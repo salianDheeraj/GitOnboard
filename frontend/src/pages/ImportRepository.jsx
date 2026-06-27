@@ -31,7 +31,7 @@ export default function ImportRepository() {
       }
 
       // Success
-      navigate('/repository')
+      navigate('/')
     } catch (err) {
       setError(err.message)
     } finally {
