@@ -4,6 +4,7 @@ import DependencyGraph from '../components/DependencyGraph'
 import Search from '../components/Search'
 import SemanticSearch from '../components/SemanticSearch'
 import RepositorySummary from '../components/RepositorySummary'
+import SymbolExplorer from '../components/SymbolExplorer'
 
 // Recursive component for rendering the folder hierarchy
 const TreeNode = ({ node, onFileClick, selectedPath }) => {
@@ -142,6 +143,12 @@ export default function RepositoryDetails() {
             Search
           </button>
           <button 
+            onClick={() => setActiveTab('symbols')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'symbols' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            Symbols
+          </button>
+          <button 
             onClick={() => setActiveTab('semantic')}
             className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'semantic' ? 'bg-white shadow-sm text-purple-700 border border-purple-100' : 'text-purple-500 hover:text-purple-700'}`}
           >
@@ -171,6 +178,10 @@ export default function RepositoryDetails() {
       ) : activeTab === 'summary' ? (
         <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <RepositorySummary repoName={repoName} />
+        </div>
+      ) : activeTab === 'symbols' ? (
+        <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <SymbolExplorer repoName={repoName} />
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-grow overflow-hidden pb-8">

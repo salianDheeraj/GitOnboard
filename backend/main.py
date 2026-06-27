@@ -856,3 +856,167 @@ def get_summary(repo_name: str):
         logger.error(f"Failed to read summary: {e}")
         raise HTTPException(status_code=500, detail="Failed to read summary")
 
+# --- PHASE 5: SYMBOL INTELLIGENCE ---
+
+class SymbolVisitor(ast.NodeVisitor):
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.symbols = []
+        self.current_class = None
+
+    def visit_ClassDef(self, node):
+        self.symbols.append({
+            "id": f"{self.file_path}::{node.name}",
+            "type": "Class",
+            "name": node.name,
+            "file_path": self.file_path,
+            "line_number": getattr(node, "lineno", None),
+            "docstring": ast.get_docstring(node) or "",
+            "methods": []
+        })
+        prev_class = self.current_class
+        self.current_class = node.name
+        self.generic_visit(node)
+        self.current_class = prev_class
+
+    def visit_FunctionDef(self, node):
+        self._handle_function(node, is_async=False)
+
+    def visit_AsyncFunctionDef(self, node):
+        self._handle_function(node, is_async=True)
+
+    def _handle_function(self, node, is_async):
+        returns = ""
+        if getattr(node, "returns", None):
+            try:
+                returns = ast.unparse(node.returns)
+            except Exception:
+                pass
+
+        parameters = []
+        if hasattr(node, "args"):
+            for arg in node.args.args:
+                parameters.append(arg.arg)
+
+        symbol = {
+            "id": f"{self.file_path}::{self.current_class + '.' if self.current_class else ''}{node.name}",
+            "type": "Method" if self.current_class else "Function",
+            "name": node.name,
+            "file_path": self.file_path,
+            "line_number": getattr(node, "lineno", None),
+            "docstring": ast.get_docstring(node) or "",
+            "parameters": parameters,
+            "returns": returns
+        }
+        
+        # If it's a method, we also append it to the parent class for quick reference
+        if self.current_class:
+            symbol["parent_class"] = self.current_class
+            for s in self.symbols:
+                if s["type"] == "Class" and s["name"] == self.current_class and s["file_path"] == self.file_path:
+                    s["methods"].append(symbol)
+                    break
+
+        self.symbols.append(symbol)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node):
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self.symbols.append({
+                    "id": f"{self.file_path}::{self.current_class + '.' if self.current_class else ''}{target.id}",
+                    "type": "Variable",
+                    "name": target.id,
+                    "file_path": self.file_path,
+                    "line_number": getattr(node, "lineno", None),
+                    "parent_class": self.current_class if self.current_class else None
+                })
+        self.generic_visit(node)
+
+@app.post("/api/repos/{repo_name}/symbols/index")
+def index_symbols(repo_name: str):
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    symbols_file = target_dir / "symbols_index.json"
+    ignored_dirs = {".git", "node_modules", "venv", "build", "dist", "__pycache__"}
+    
+    all_symbols = []
+    
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+        for file in files:
+            if file.endswith(".py"):
+                pf = Path(root) / file
+                rel_str = str(pf.relative_to(target_dir)).replace("\\", "/")
+                
+                try:
+                    with open(pf, "r", encoding="utf-8") as f:
+                        source = f.read()
+                    
+                    tree = ast.parse(source)
+                    visitor = SymbolVisitor(file_path=rel_str)
+                    visitor.visit(tree)
+                    
+                    all_symbols.extend(visitor.symbols)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to parse {rel_str} during symbol indexing: {e}")
+                    pass
+                    
+    try:
+        with open(symbols_file, "w", encoding="utf-8") as f:
+            json.dump(all_symbols, f, indent=2)
+        return {"message": "Symbol database created successfully", "total_symbols": len(all_symbols)}
+    except Exception as e:
+        logger.error(f"Failed to write symbols_index.json: {e}")
+        raise HTTPException(status_code=500, detail="Failed to write symbol database")
+
+@app.get("/api/repos/{repo_name}/symbols")
+def get_symbols(repo_name: str):
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    symbols_file = target_dir / "symbols_index.json"
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    if not symbols_file.exists():
+        # Fallback to trigger index if missing
+        index_symbols(repo_name)
+        
+    try:
+        with open(symbols_file, "r", encoding="utf-8") as f:
+            symbols = json.load(f)
+        return {"symbols": symbols}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to read symbol database")
+
+@app.get("/api/repos/{repo_name}/symbols/search")
+def search_symbols(repo_name: str, q: str):
+    if not q:
+        return {"results": []}
+        
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    symbols_file = target_dir / "symbols_index.json"
+    
+    if not symbols_file.exists():
+        index_symbols(repo_name)
+        
+    try:
+        with open(symbols_file, "r", encoding="utf-8") as f:
+            symbols = json.load(f)
+            
+        results = []
+        q_lower = q.lower()
+        for sym in symbols:
+            if q_lower in sym["name"].lower():
+                results.append(sym)
+                
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to search symbol database")
