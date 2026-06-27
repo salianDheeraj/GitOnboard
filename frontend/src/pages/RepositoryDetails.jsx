@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import DependencyGraph from '../components/DependencyGraph'
+import Search from '../components/Search'
 
 // Recursive component for rendering the folder hierarchy
 const TreeNode = ({ node, onFileClick, selectedPath }) => {
@@ -132,12 +133,22 @@ export default function RepositoryDetails() {
           >
             Dependency Graph
           </button>
+          <button 
+            onClick={() => setActiveTab('search')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'search' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            Search
+          </button>
         </div>
       </div>
 
       {activeTab === 'graph' ? (
         <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-2">
           <DependencyGraph repoName={repoName} />
+        </div>
+      ) : activeTab === 'search' ? (
+        <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <Search repoName={repoName} />
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-grow overflow-hidden pb-8">

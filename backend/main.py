@@ -371,3 +371,162 @@ def get_dependencies(repo_name: str):
     formatted_edges = [{"id": f"e-{s}-{t}", "source": s, "target": t} for s, t in edges]
     
     return {"nodes": nodes, "edges": formatted_edges}
+
+@app.post("/api/repos/{repo_name}/index")
+def index_repo(repo_name: str):
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    index_file = target_dir / "metadata_index.json"
+    ignored_dirs = {".git", "node_modules", "venv", "build", "dist", "__pycache__"}
+    
+    indexed_files = []
+    
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+        for file in files:
+            if file.endswith(".py"):
+                pf = Path(root) / file
+                rel_str = str(pf.relative_to(target_dir)).replace("\\", "/")
+                
+                try:
+                    with open(pf, "r", encoding="utf-8") as f:
+                        source = f.read()
+                    
+                    tree = ast.parse(source)
+                    
+                    imports = []
+                    functions = []
+                    classes = []
+                    file_docstring = ast.get_docstring(tree) or ""
+                    
+                    for node in tree.body:
+                        if isinstance(node, ast.Import):
+                            for alias in node.names:
+                                imports.append(alias.name)
+                        elif isinstance(node, ast.ImportFrom):
+                            module = node.module or ""
+                            for alias in node.names:
+                                imports.append(f"{module}.{alias.name}" if module else alias.name)
+                        elif isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef):
+                            functions.append({
+                                "name": node.name,
+                                "docstring": ast.get_docstring(node) or ""
+                            })
+                        elif isinstance(node, ast.ClassDef):
+                            class_data = {
+                                "name": node.name,
+                                "docstring": ast.get_docstring(node) or "",
+                                "methods": []
+                            }
+                            for class_node in node.body:
+                                if isinstance(class_node, ast.FunctionDef) or isinstance(class_node, ast.AsyncFunctionDef):
+                                    class_data["methods"].append({
+                                        "name": class_node.name,
+                                        "docstring": ast.get_docstring(class_node) or ""
+                                    })
+                            classes.append(class_data)
+                            
+                    indexed_files.append({
+                        "file_path": rel_str,
+                        "file_name": pf.name,
+                        "docstring": file_docstring,
+                        "imports": imports,
+                        "functions": functions,
+                        "classes": classes
+                    })
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to parse {rel_str} during indexing: {e}")
+                    pass
+                    
+    try:
+        with open(index_file, "w", encoding="utf-8") as f:
+            json.dump(indexed_files, f, indent=2)
+        return {"message": "Indexing complete", "indexed_files_count": len(indexed_files)}
+    except Exception as e:
+        logger.error(f"Failed to save index: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save index")
+
+@app.get("/api/repos/{repo_name}/search")
+def search_repo(repo_name: str, q: str):
+    if not q or len(q.strip()) == 0:
+        return {"results": []}
+        
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    index_file = target_dir / "metadata_index.json"
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    if not index_file.exists():
+        # Auto-trigger indexing if it doesn't exist
+        index_repo(repo_name)
+        
+    try:
+        with open(index_file, "r", encoding="utf-8") as f:
+            indexed_files = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to load index")
+        
+    query = q.lower()
+    results = []
+    
+    for item in indexed_files:
+        is_match = False
+        match_reasons = []
+        
+        # Check file name
+        if query in item["file_name"].lower():
+            is_match = True
+            match_reasons.append(f"File name matches: {item['file_name']}")
+            
+        # Check file docstring
+        if query in item["docstring"].lower():
+            is_match = True
+            match_reasons.append("File docstring matches")
+            
+        # Check imports
+        for imp in item["imports"]:
+            if query in imp.lower():
+                is_match = True
+                match_reasons.append(f"Import matches: {imp}")
+                
+        # Check functions
+        for func in item["functions"]:
+            if query in func["name"].lower():
+                is_match = True
+                match_reasons.append(f"Function matches: {func['name']}")
+            elif query in func["docstring"].lower():
+                is_match = True
+                match_reasons.append(f"Docstring in function '{func['name']}' matches")
+                
+        # Check classes
+        for cls in item["classes"]:
+            if query in cls["name"].lower():
+                is_match = True
+                match_reasons.append(f"Class matches: {cls['name']}")
+            elif query in cls["docstring"].lower():
+                is_match = True
+                match_reasons.append(f"Docstring in class '{cls['name']}' matches")
+            else:
+                for method in cls["methods"]:
+                    if query in method["name"].lower():
+                        is_match = True
+                        match_reasons.append(f"Method matches: {method['name']} in class {cls['name']}")
+                    elif query in method["docstring"].lower():
+                        is_match = True
+                        match_reasons.append(f"Docstring in method '{method['name']}' matches")
+                        
+        if is_match:
+            results.append({
+                "file_path": item["file_path"],
+                "match_reasons": list(set(match_reasons))[:3] # Limit to top 3 reasons
+            })
+            
+    return {"results": results}
+
