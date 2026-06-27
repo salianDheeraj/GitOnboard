@@ -49,10 +49,11 @@ export default function DependencyGraph({ repoName }) {
   // Custom Control States
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectedNode, setSelectedNode] = useState(null);
-  const [isLocked, setIsLocked] = useState(false);
   
   const containerRef = useRef(null);
   const rfInstance = useRef(null);
+  const simulationRef = useRef(null);
+  const initialNodesRef = useRef([]);
 
   useEffect(() => {
     let isMounted = true;
@@ -84,7 +85,6 @@ export default function DependencyGraph({ repoName }) {
           target: e.target,
           type: 'straight',
           animated: false,
-          // Use a custom marker offset by making the arrow larger but pushed back
           markerEnd: { type: MarkerType.ArrowClosed, color: '#d1d5db', width: 15, height: 15 },
           style: { stroke: '#e5e7eb', strokeWidth: 1.5, opacity: 0.6 }
         }));
@@ -94,30 +94,41 @@ export default function DependencyGraph({ repoName }) {
           .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
           .map(e => ({ ...e }));
         
-        // Setup D3 Force Simulation
-        // We run it synchronously instead of animating it
-        const simulation = d3.forceSimulation(initialNodes)
-          .force('charge', d3.forceManyBody().strength(-300)) // Less repulsion to keep them closer
-          .force('center', d3.forceCenter(0, 0)) 
-          .force('collide', d3.forceCollide().radius(40)) // Smaller collision radius
-          .force('x', d3.forceX(0).strength(0.1)) // Stronger gravity to center
-          .force('y', d3.forceY(0).strength(0.1)) 
-          .force('link', d3.forceLink(simulationEdges).id(d => d.id).distance(80)) // Shorter links
-          .stop(); // Stop the automatic ticker
+        // Save to ref so drag handlers can access them
+        initialNodesRef.current = initialNodes;
 
-        // Fast-forward the simulation to its end state (stationary)
+        // Setup D3 Force Simulation
+        const simulation = d3.forceSimulation(initialNodes)
+          .force('charge', d3.forceManyBody().strength(-400)) // Repel nodes
+          .force('center', d3.forceCenter(0, 0)) 
+          .force('collide', d3.forceCollide().radius(85)) // Larger collision radius to prevent pill overlaps
+          .force('x', d3.forceX(0).strength(0.1)) 
+          .force('y', d3.forceY(0).strength(0.1)) 
+          .force('link', d3.forceLink(simulationEdges).id(d => d.id).distance(100));
+          
+        simulationRef.current = simulation;
+
+        // Fast-forward the simulation so it appears stationary on load
         simulation.tick(300);
 
         // Map final D3 coordinates to React Flow positions
-        const finalizedNodes = initialNodes.map(n => ({
-          id: n.id,
-          type: 'custom',
-          data: n.data,
-          position: { x: isNaN(n.x) ? 0 : n.x, y: isNaN(n.y) ? 0 : n.y },
-        }));
-
-        setNodes(finalizedNodes);
+        const updateReactFlowNodes = () => {
+          setNodes(initialNodes.map(n => ({
+            id: n.id,
+            type: 'custom',
+            data: n.data,
+            position: { x: isNaN(n.x) ? 0 : n.x, y: isNaN(n.y) ? 0 : n.y },
+          })));
+        };
+        
+        updateReactFlowNodes();
         setEdges(initialEdges);
+        
+        // Listen to live ticks for when the user drags a node and wakes up physics
+        simulation.on('tick', () => {
+          if (!isMounted) return;
+          updateReactFlowNodes();
+        });
         
         // Center view on the stationary graph
         setTimeout(() => {
@@ -136,6 +147,7 @@ export default function DependencyGraph({ repoName }) {
     
     return () => {
       isMounted = false;
+      if (simulationRef.current) simulationRef.current.stop();
     };
   }, [repoName]); 
 
@@ -148,6 +160,37 @@ export default function DependencyGraph({ repoName }) {
     []
   );
 
+  // Wire up React Flow Drag events to D3 physics
+  const onNodeDragStart = useCallback((_, node) => {
+    if (!simulationRef.current) return;
+    const simNode = initialNodesRef.current.find(n => n.id === node.id);
+    if (simNode) {
+      simNode.fx = simNode.x;
+      simNode.fy = simNode.y;
+      simulationRef.current.alphaTarget(0.3).restart(); // Wake up physics
+    }
+  }, []);
+
+  const onNodeDrag = useCallback((_, node) => {
+    if (!simulationRef.current) return;
+    const simNode = initialNodesRef.current.find(n => n.id === node.id);
+    if (simNode) {
+      // Pin the node to the mouse position
+      simNode.fx = node.position.x;
+      simNode.fy = node.position.y;
+    }
+  }, []);
+
+  const onNodeDragStop = useCallback((_, node) => {
+    if (!simulationRef.current) return;
+    const simNode = initialNodesRef.current.find(n => n.id === node.id);
+    if (simNode) {
+      simNode.fx = null;
+      simNode.fy = null;
+      simulationRef.current.alphaTarget(0); // Let physics cool down and stabilize again
+    }
+  }, []);
+
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
       if (containerRef.current) {
@@ -158,10 +201,6 @@ export default function DependencyGraph({ repoName }) {
     } else {
       document.exitFullscreen();
     }
-  };
-
-  const toggleLock = () => {
-    setIsLocked(!isLocked);
   };
 
   const onNodeClick = useCallback((_, node) => {
@@ -223,16 +262,15 @@ export default function DependencyGraph({ repoName }) {
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDrag={onNodeDrag}
+        onNodeDragStop={onNodeDragStop}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         onInit={(instance) => { rfInstance.current = instance; }}
         minZoom={0.05}
         maxZoom={2.5}
-        nodesDraggable={!isLocked}
-        panOnDrag={!isLocked}
-        zoomOnScroll={!isLocked}
-        zoomOnPinch={!isLocked}
-        zoomOnDoubleClick={!isLocked}
+        nodesDraggable={true}
       >
         <Background color="#f3f4f6" gap={20} size={1} />
         
@@ -240,9 +278,6 @@ export default function DependencyGraph({ repoName }) {
         <Controls showInteractive={false} showFitView={false} position="bottom-right">
           <ControlButton onClick={toggleFullscreen} title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>
             {isFullscreen ? "↙️" : "↗️"}
-          </ControlButton>
-          <ControlButton onClick={toggleLock} title={isLocked ? "Unlock Graph" : "Lock Graph"}>
-            {isLocked ? "🔒" : "🔓"}
           </ControlButton>
         </Controls>
         
