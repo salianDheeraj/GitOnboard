@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import DependencyGraph from '../components/DependencyGraph'
 import Search from '../components/Search'
+import SemanticSearch from '../components/SemanticSearch'
 
 // Recursive component for rendering the folder hierarchy
 const TreeNode = ({ node, onFileClick, selectedPath }) => {
@@ -139,6 +140,12 @@ export default function RepositoryDetails() {
           >
             Search
           </button>
+          <button 
+            onClick={() => setActiveTab('semantic')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'semantic' ? 'bg-white shadow-sm text-purple-700 border border-purple-100' : 'text-purple-500 hover:text-purple-700'}`}
+          >
+            ✨ Semantic Search
+          </button>
         </div>
       </div>
 
@@ -149,6 +156,10 @@ export default function RepositoryDetails() {
       ) : activeTab === 'search' ? (
         <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <Search repoName={repoName} />
+        </div>
+      ) : activeTab === 'semantic' ? (
+        <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <SemanticSearch repoName={repoName} />
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-grow overflow-hidden pb-8">

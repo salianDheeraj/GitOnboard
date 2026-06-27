@@ -8,6 +8,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pydantic-settings",
+    "chromadb",
 ]
 
 [tool.ruff]

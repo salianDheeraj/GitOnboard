@@ -10,6 +10,7 @@ import logging
 import json
 from datetime import datetime, timezone
 import ast
+import chromadb
 
 from backend.config import settings
 from backend.logger import setup_logging
@@ -529,4 +530,187 @@ def search_repo(repo_name: str, q: str):
             })
             
     return {"results": results}
+
+@app.get("/api/repos/{repo_name}/semantic-status")
+def semantic_status_repo(repo_name: str):
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    state_file = target_dir / "semantic_index_state.json"
+    return {"has_index": state_file.exists()}
+
+@app.post("/api/repos/{repo_name}/semantic-index")
+def semantic_index_repo(repo_name: str):
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    chroma_dir = target_dir / "chroma"
+    chroma_dir.mkdir(parents=True, exist_ok=True)
+    
+    state_file = target_dir / "semantic_index_state.json"
+    state = {}
+    if state_file.exists():
+        try:
+            with open(state_file, "r") as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+            
+    from chromadb.api.shared_system_client import SharedSystemClient
+    SharedSystemClient.clear_system_cache()
+    client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
+    collection = client.get_or_create_collection(name="semantic_index")
+    
+    ignored_dirs = {".git", "node_modules", "venv", "build", "dist", "__pycache__"}
+    
+    current_files = {}
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+        for file in files:
+            if file.endswith(".py") and not file.startswith("."):
+                pf = Path(root) / file
+                rel_str = str(pf.relative_to(target_dir)).replace("\\", "/")
+                try:
+                    mtime = pf.stat().st_mtime
+                    current_files[rel_str] = mtime
+                except Exception:
+                    pass
+                    
+    deleted_files = set(state.keys()) - set(current_files.keys())
+    modified_files = set()
+    new_files = set(current_files.keys()) - set(state.keys())
+    
+    for f in current_files:
+        if f in state and current_files[f] > state[f]:
+            modified_files.add(f)
+            
+    files_to_process = new_files | modified_files
+    files_to_delete_chunks = deleted_files | modified_files
+    
+    status = "up to date"
+    if not state:
+        status = "indexed"
+    elif files_to_process or files_to_delete_chunks:
+        status = "updated"
+        
+    if not files_to_process and not files_to_delete_chunks:
+        return {"message": "Semantic index up to date", "status": status, "processed": 0, "deleted": 0}
+        
+    # Delete old chunks for modified and deleted files
+    if files_to_delete_chunks:
+        for f in files_to_delete_chunks:
+            try:
+                collection.delete(where={"file_path": f})
+            except Exception as e:
+                logger.warning(f"Failed to delete old chunks for {f}: {e}")
+                pass
+                
+    documents = []
+    metadatas = []
+    ids = []
+    
+    import uuid
+    
+    for rel_str in files_to_process:
+        pf = target_dir / rel_str
+        try:
+            with open(pf, "r", encoding="utf-8") as f:
+                source = f.read()
+            tree = ast.parse(source)
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    segment = ast.get_source_segment(source, node)
+                    if not segment: continue
+                    element_type = "class" if isinstance(node, ast.ClassDef) else "function"
+                    documents.append(segment)
+                    metadatas.append({
+                        "file_path": rel_str,
+                        "type": element_type,
+                        "name": node.name
+                    })
+                    ids.append(str(uuid.uuid4()))
+        except Exception as e:
+            logger.warning(f"Failed to parse {rel_str} for semantic indexing: {e}")
+            pass
+            
+    if documents:
+        batch_size = 2000
+        for i in range(0, len(documents), batch_size):
+            collection.upsert(
+                documents=documents[i:i+batch_size],
+                metadatas=metadatas[i:i+batch_size],
+                ids=ids[i:i+batch_size]
+            )
+            
+    for f in deleted_files:
+        if f in state:
+            del state[f]
+            
+    for f in files_to_process:
+        state[f] = current_files[f]
+        
+    try:
+        with open(state_file, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save state file: {e}")
+        
+    return {
+        "message": "Semantic indexing complete",
+        "status": status,
+        "processed": len(files_to_process),
+        "deleted": len(deleted_files)
+    }
+
+@app.get("/api/repos/{repo_name}/semantic-search")
+def semantic_search_repo(repo_name: str, q: str):
+    if not q or len(q.strip()) == 0:
+        return {"results": []}
+        
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    chroma_dir = target_dir / "chroma"
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    if not chroma_dir.exists():
+        # Auto-trigger indexing if the database hasn't been created yet
+        semantic_index_repo(repo_name)
+        
+    try:
+        from chromadb.api.shared_system_client import SharedSystemClient
+        SharedSystemClient.clear_system_cache()
+        client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
+        collection = client.get_collection(name="semantic_index")
+    except Exception as e:
+        logger.error(f"Failed to load Chroma collection: {e}")
+        raise HTTPException(status_code=500, detail="Semantic index not found or corrupted")
+        
+    try:
+        # Query the semantic index using natural language
+        query_results = collection.query(
+            query_texts=[q],
+            n_results=10
+        )
+        
+        results = []
+        if query_results and query_results["metadatas"] and len(query_results["metadatas"]) > 0:
+            for idx, meta in enumerate(query_results["metadatas"][0]):
+                results.append({
+                    "file_path": meta["file_path"],
+                    "match_type": meta["type"],
+                    "match_name": meta["name"],
+                    "distance": query_results["distances"][0][idx] if query_results["distances"] else 0
+                })
+                
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Semantic search failed: {e}")
+        raise HTTPException(status_code=500, detail="Search failed")
 
