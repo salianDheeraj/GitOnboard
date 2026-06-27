@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 import ast
 import chromadb
+from backend.llm_service import llm_service
 
 from backend.config import settings
 from backend.logger import setup_logging
@@ -713,4 +714,145 @@ def semantic_search_repo(repo_name: str, q: str):
     except Exception as e:
         logger.error(f"Semantic search failed: {e}")
         raise HTTPException(status_code=500, detail="Search failed")
+
+def _gather_repo_metadata(repo_name: str, target_dir: Path) -> dict:
+    ignored_dirs = {".git", "node_modules", "venv", "build", "dist", "__pycache__"}
+    
+    ext_to_lang = {
+        ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", 
+        ".html": "HTML", ".css": "CSS", ".java": "Java",
+        ".cpp": "C++", ".c": "C", ".go": "Go", ".rs": "Rust"
+    }
+    
+    languages = set()
+    modules = set()
+    entry_points = []
+    file_sizes = []
+    
+    # folder structure representation
+    structure = {}
+    
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs]
+        
+        rel_root = str(Path(root).relative_to(target_dir)).replace("\\", "/")
+        if rel_root == ".":
+            current_level = structure
+        else:
+            parts = rel_root.split("/")
+            current_level = structure
+            for p in parts:
+                if p not in current_level:
+                    current_level[p] = {}
+                current_level = current_level[p]
+                
+        for file in files:
+            if not file.startswith("."):
+                current_level[file] = "file"
+                
+                ext = Path(file).suffix
+                if ext in ext_to_lang:
+                    languages.add(ext_to_lang[ext])
+                
+                # Check for modules (top level directories containing code)
+                if rel_root != "." and rel_root.split("/")[0] not in ignored_dirs and ext == ".py":
+                    modules.add(rel_root.split("/")[0])
+                    
+                pf = Path(root) / file
+                try:
+                    size = pf.stat().st_size
+                    rel_path = str(pf.relative_to(target_dir)).replace("\\", "/")
+                    file_sizes.append((rel_path, size))
+                    
+                    # Detect entry points
+                    if ext == ".py":
+                        if file in ["main.py", "app.py", "run.py", "__main__.py"]:
+                            entry_points.append(rel_path)
+                        elif size < 100000: # only scan small files to save time
+                            with open(pf, "r", encoding="utf-8", errors="ignore") as f:
+                                content = f.read()
+                                if "__name__" in content and ("'__main__'" in content or '"__main__"' in content):
+                                    if rel_path not in entry_points:
+                                        entry_points.append(rel_path)
+                except Exception:
+                    pass
+
+    # Sort file sizes and get top 5
+    file_sizes.sort(key=lambda x: x[1], reverse=True)
+    largest_files = [f"{f[0]} ({f[1]} bytes)" for f in file_sizes[:5]]
+    
+    # Dependencies
+    dependencies = []
+    deps_file = Path("data/repos") / repo_name / "dependency_graph.json"
+    if deps_file.exists():
+        try:
+            with open(deps_file, "r") as f:
+                deps_data = json.load(f)
+                nodes = deps_data.get("nodes", [])
+                dependencies = [n["id"] for n in nodes if n.get("type") == "third-party"]
+        except Exception:
+            pass
+
+    return {
+        "repository_name": repo_name,
+        "languages": list(languages),
+        "modules": list(modules),
+        "dependencies": dependencies[:20], # limit to avoid huge prompts
+        "entry_points": entry_points,
+        "largest_files": largest_files,
+        "folder_structure": structure
+    }
+
+@app.post("/api/repos/{repo_name}/summary/generate")
+def generate_summary(repo_name: str):
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    try:
+        metadata = _gather_repo_metadata(repo_name, target_dir)
+        summary_md = llm_service.generate_summary(metadata)
+        
+        summary_file = target_dir / "summary.md"
+        with open(summary_file, "w", encoding="utf-8") as f:
+            f.write(summary_md)
+            
+        return {"summary": summary_md, "status": "generated"}
+    except Exception as e:
+        import traceback
+        logger.error(f"Summary generation failed:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/repos/{repo_name}/summary")
+def get_summary(repo_name: str):
+    repos_dir = Path("data/repos")
+    target_dir = repos_dir / repo_name
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    summary_file = target_dir / "summary.md"
+    state_file = target_dir / "semantic_index_state.json"
+    
+    if not summary_file.exists():
+        return {"summary": None, "outdated": False}
+        
+    try:
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary_md = f.read()
+            
+        outdated = False
+        # If semantic index state is newer than the summary, it's outdated
+        if state_file.exists():
+            summary_mtime = summary_file.stat().st_mtime
+            state_mtime = state_file.stat().st_mtime
+            if state_mtime > summary_mtime:
+                outdated = True
+                
+        return {"summary": summary_md, "outdated": outdated}
+    except Exception as e:
+        logger.error(f"Failed to read summary: {e}")
+        raise HTTPException(status_code=500, detail="Failed to read summary")
 
