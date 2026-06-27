@@ -1,27 +1,43 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import ReactFlow, {
   Controls,
+  ControlButton,
   Background,
   applyNodeChanges,
   applyEdgeChanges,
-  MarkerType
+  MarkerType,
+  Panel,
+  Handle,
+  Position,
+  getBezierPath,
+  getStraightPath
 } from 'reactflow';
 import 'reactflow/dist/style.css';
+import * as d3 from 'd3-force';
 
-// Simple circle layout function
-const getCircleLayout = (nodes) => {
-  const nodeCount = nodes.length;
-  const radius = Math.max(300, nodeCount * 25);
-  return nodes.map((node, i) => {
-    const angle = (i / nodeCount) * 2 * Math.PI;
-    return {
-      ...node,
-      position: {
-        x: radius + radius * Math.cos(angle),
-        y: radius + radius * Math.sin(angle)
-      }
-    };
-  });
+// Custom Node to place handles in the center so edges point exactly at the node
+const CustomNode = ({ data }) => (
+  <div style={{
+    background: '#ffffff',
+    border: '2px solid #6366f1',
+    borderRadius: '24px',
+    padding: '8px 16px',
+    fontSize: '12px',
+    fontWeight: '600',
+    color: '#374151',
+    fontFamily: 'sans-serif',
+    boxShadow: '0 2px 4px -1px rgb(0 0 0 / 0.1)',
+    minWidth: '50px',
+    textAlign: 'center',
+  }}>
+    <Handle type="target" position={Position.Top} style={{ visibility: 'hidden', top: '50%' }} />
+    <Handle type="source" position={Position.Bottom} style={{ visibility: 'hidden', top: '50%' }} />
+    {data.label}
+  </div>
+);
+
+const nodeTypes = {
+  custom: CustomNode,
 };
 
 export default function DependencyGraph({ repoName }) {
@@ -29,8 +45,18 @@ export default function DependencyGraph({ repoName }) {
   const [edges, setEdges] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  
+  // Custom Control States
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [isLocked, setIsLocked] = useState(false);
+  
+  const containerRef = useRef(null);
+  const rfInstance = useRef(null);
 
   useEffect(() => {
+    let isMounted = true;
+    
     const fetchGraph = async () => {
       setIsLoading(true);
       setError(null);
@@ -40,42 +66,78 @@ export default function DependencyGraph({ repoName }) {
           throw new Error("Failed to load dependency graph.");
         }
         const data = await res.json();
+        if (!isMounted) return;
         
-        // Convert to React Flow format
+        // Setup initial nodes
         const initialNodes = data.nodes.map(n => ({
           id: n.id,
-          data: { label: n.full_path }, // Use full path for clarity
-          position: { x: 0, y: 0 },
-          style: {
-            background: '#fff',
-            border: '2px solid #2563eb',
-            borderRadius: '4px',
-            padding: '10px',
-            fontSize: '12px',
-            fontFamily: 'monospace'
-          }
+          type: 'custom',
+          data: { label: n.full_path.split('/').pop() }, 
+          // Give them a random initial position
+          x: Math.random() * 500 - 250, 
+          y: Math.random() * 500 - 250 
         }));
         
         const initialEdges = data.edges.map(e => ({
           id: e.id,
           source: e.source,
           target: e.target,
-          animated: true,
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#9ca3af' },
-          style: { stroke: '#9ca3af', strokeWidth: 2 }
+          type: 'straight',
+          animated: false,
+          // Use a custom marker offset by making the arrow larger but pushed back
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#d1d5db', width: 15, height: 15 },
+          style: { stroke: '#e5e7eb', strokeWidth: 1.5, opacity: 0.6 }
         }));
 
-        setNodes(getCircleLayout(initialNodes));
+        const nodeIds = new Set(initialNodes.map(n => n.id));
+        const simulationEdges = initialEdges
+          .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
+          .map(e => ({ ...e }));
+        
+        // Setup D3 Force Simulation
+        // We run it synchronously instead of animating it
+        const simulation = d3.forceSimulation(initialNodes)
+          .force('charge', d3.forceManyBody().strength(-300)) // Less repulsion to keep them closer
+          .force('center', d3.forceCenter(0, 0)) 
+          .force('collide', d3.forceCollide().radius(40)) // Smaller collision radius
+          .force('x', d3.forceX(0).strength(0.1)) // Stronger gravity to center
+          .force('y', d3.forceY(0).strength(0.1)) 
+          .force('link', d3.forceLink(simulationEdges).id(d => d.id).distance(80)) // Shorter links
+          .stop(); // Stop the automatic ticker
+
+        // Fast-forward the simulation to its end state (stationary)
+        simulation.tick(300);
+
+        // Map final D3 coordinates to React Flow positions
+        const finalizedNodes = initialNodes.map(n => ({
+          id: n.id,
+          type: 'custom',
+          data: n.data,
+          position: { x: isNaN(n.x) ? 0 : n.x, y: isNaN(n.y) ? 0 : n.y },
+        }));
+
+        setNodes(finalizedNodes);
         setEdges(initialEdges);
+        
+        // Center view on the stationary graph
+        setTimeout(() => {
+          if (!isMounted || !rfInstance.current) return;
+          rfInstance.current.fitView({ padding: 0.2, duration: 800 });
+        }, 100);
+
       } catch (err) {
-        setError(err.message);
+        if (isMounted) setError(err.message);
       } finally {
-        setIsLoading(false);
+        if (isMounted) setIsLoading(false);
       }
     };
 
     fetchGraph();
-  }, [repoName]);
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [repoName]); 
 
   const onNodesChange = useCallback(
     (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
@@ -86,8 +148,60 @@ export default function DependencyGraph({ repoName }) {
     []
   );
 
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      if (containerRef.current) {
+        containerRef.current.requestFullscreen().catch((err) => {
+          console.error(`Error attempting to enable fullscreen mode: ${err.message}`);
+        });
+      }
+    } else {
+      document.exitFullscreen();
+    }
+  };
+
+  const toggleLock = () => {
+    setIsLocked(!isLocked);
+  };
+
+  const onNodeClick = useCallback((_, node) => {
+    setSelectedNode(node.id);
+  }, []);
+
+  const onPaneClick = useCallback(() => {
+    setSelectedNode(null);
+  }, []);
+
+  // Compute styles dynamically for selection effects
+  const renderedEdges = useMemo(() => {
+    return edges.map(e => {
+      if (!selectedNode) {
+        return {
+          ...e,
+          style: { stroke: '#cbd5e1', strokeWidth: 1.5, opacity: 0.8 },
+          animated: false,
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 20, height: 20 },
+          zIndex: 0
+        };
+      }
+      
+      const isConnected = e.source === selectedNode || e.target === selectedNode;
+      return {
+        ...e,
+        style: { 
+          stroke: isConnected ? '#6366f1' : '#e2e8f0', // darker gray for non-connected
+          strokeWidth: isConnected ? 3 : 1, 
+          opacity: isConnected ? 1 : 0.3 // slightly higher opacity for non-connected
+        },
+        animated: isConnected,
+        markerEnd: { type: MarkerType.ArrowClosed, color: isConnected ? '#6366f1' : '#e2e8f0', width: 20, height: 20 },
+        zIndex: isConnected ? 10 : 0
+      };
+    });
+  }, [edges, selectedNode]);
+
   if (isLoading) {
-    return <div className="h-full flex items-center justify-center text-gray-500">Generating Dependency Graph...</div>;
+    return <div className="h-full flex items-center justify-center text-gray-500">Generating graph layout...</div>;
   }
 
   if (error) {
@@ -99,21 +213,43 @@ export default function DependencyGraph({ repoName }) {
   }
 
   return (
-    <div className="w-full h-full bg-gray-50 rounded-lg border border-gray-200 overflow-hidden relative">
+    <div 
+      ref={containerRef}
+      className="w-full h-full bg-white rounded-lg border border-gray-200 overflow-hidden relative"
+    >
       <ReactFlow
         nodes={nodes}
-        edges={edges}
+        edges={renderedEdges}
+        nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        fitView
-        minZoom={0.1}
+        onNodeClick={onNodeClick}
+        onPaneClick={onPaneClick}
+        onInit={(instance) => { rfInstance.current = instance; }}
+        minZoom={0.05}
+        maxZoom={2.5}
+        nodesDraggable={!isLocked}
+        panOnDrag={!isLocked}
+        zoomOnScroll={!isLocked}
+        zoomOnPinch={!isLocked}
+        zoomOnDoubleClick={!isLocked}
       >
-        <Background color="#ccc" gap={16} />
-        <Controls />
+        <Background color="#f3f4f6" gap={20} size={1} />
+        
+        {/* Integrated Controls */}
+        <Controls showInteractive={false} showFitView={false} position="bottom-right">
+          <ControlButton onClick={toggleFullscreen} title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>
+            {isFullscreen ? "↙️" : "↗️"}
+          </ControlButton>
+          <ControlButton onClick={toggleLock} title={isLocked ? "Unlock Graph" : "Lock Graph"}>
+            {isLocked ? "🔒" : "🔓"}
+          </ControlButton>
+        </Controls>
+        
+        <Panel position="top-left" className="bg-white/90 shadow-sm border border-gray-100 px-3 py-1.5 rounded-full text-xs font-semibold text-gray-600 pointer-events-none">
+          {nodes.length} Files | {edges.length} Dependencies
+        </Panel>
       </ReactFlow>
-      <div className="absolute top-4 left-4 bg-white/80 p-2 rounded shadow text-xs font-semibold text-gray-700 pointer-events-none">
-        {nodes.length} Files | {edges.length} Dependencies
-      </div>
     </div>
   );
 }
