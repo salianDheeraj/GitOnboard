@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react';
 import ReactFlow, {
   Controls,
   ControlButton,
@@ -9,14 +9,17 @@ import ReactFlow, {
   Panel,
   Handle,
   Position,
+  BaseEdge,
   getBezierPath,
-  getStraightPath
+  EdgeLabelRenderer
 } from 'reactflow';
 import 'reactflow/dist/style.css';
-import * as d3 from 'd3-force';
+import { layoutGraph, applyLocalRelaxation } from '../utils/layout';
+import { buildVFS, buildNodePathMap, calculateVisualComplexity, getAutoExpandedPaths } from '../utils/vfs';
+import { buildVisibleGraph } from '../utils/graphBuilder';
 
-// Custom Node to place handles in the center so edges point exactly at the node
-const CustomNode = ({ data }) => (
+// Custom Node for Files
+const CustomNode = memo(({ data }) => (
   <div style={{
     background: '#ffffff',
     border: '2px solid #6366f1',
@@ -34,13 +37,82 @@ const CustomNode = ({ data }) => (
     <Handle type="source" position={Position.Bottom} style={{ visibility: 'hidden', top: '50%' }} />
     {data.label}
   </div>
-);
+));
+
+// Custom Node for Folders
+const FolderNode = memo(({ data }) => (
+  <div style={{
+    background: '#f8fafc',
+    border: '2px dashed #94a3b8',
+    borderRadius: '8px',
+    padding: '12px 20px',
+    fontSize: '13px',
+    fontWeight: '700',
+    color: '#475569',
+    fontFamily: 'sans-serif',
+    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.05)',
+    minWidth: '80px',
+    textAlign: 'center',
+    cursor: 'pointer'
+  }}>
+    <Handle type="target" position={Position.Top} style={{ visibility: 'hidden', top: '50%' }} />
+    <Handle type="source" position={Position.Bottom} style={{ visibility: 'hidden', top: '50%' }} />
+    📁 {data.label} <span style={{fontSize: '10px', color: '#94a3b8', marginLeft: '4px'}}>({data.descendants})</span>
+  </div>
+));
+
+// Custom Edge for Aggregates
+const AggregateEdge = memo(({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, style, markerEnd }) => {
+  const [edgePath, labelX, labelY] = getBezierPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+  });
+
+  return (
+    <>
+      <BaseEdge path={edgePath} markerEnd={markerEnd} style={{ ...style, pointerEvents: 'none' }} />
+      <EdgeLabelRenderer>
+        <div
+          style={{
+            position: 'absolute',
+            transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+            background: '#ffffff',
+            padding: '2px 6px',
+            borderRadius: '12px',
+            fontSize: '9px',
+            fontWeight: 700,
+            color: '#64748b',
+            border: '1px solid #e2e8f0',
+            pointerEvents: 'all',
+          }}
+          className="nodrag nopan"
+        >
+          {data.count} imports
+        </div>
+      </EdgeLabelRenderer>
+    </>
+  );
+});
 
 const nodeTypes = {
   custom: CustomNode,
+  folderNode: FolderNode
 };
 
+const edgeTypes = {
+  aggregateEdge: AggregateEdge
+};
+
+let renderCount = 0;
+
 export default function DependencyGraph({ repoName }) {
+  renderCount++;
+  console.log(`[Profiler] DependencyGraph rendered. Total renders: ${renderCount}`);
+
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -49,11 +121,16 @@ export default function DependencyGraph({ repoName }) {
   // Custom Control States
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectedNode, setSelectedNode] = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  
+  // Architecture States
+  const [vfsRoot, setVfsRoot] = useState(null);
+  const [rawGraphData, setRawGraphData] = useState(null);
+  const [expandedPaths, setExpandedPaths] = useState(new Set());
   
   const containerRef = useRef(null);
   const rfInstance = useRef(null);
-  const simulationRef = useRef(null);
-  const initialNodesRef = useRef([]);
+  const expandAnchorIdRef = useRef(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -69,73 +146,24 @@ export default function DependencyGraph({ repoName }) {
         const data = await res.json();
         if (!isMounted) return;
         
-        // Setup initial nodes
-        const initialNodes = data.nodes.map(n => ({
-          id: n.id,
-          type: 'custom',
-          data: { label: n.full_path.split('/').pop() }, 
-          // Give them a random initial position
-          x: Math.random() * 500 - 250, 
-          y: Math.random() * 500 - 250 
-        }));
+        // Ensure nodes have full_path
+        const validNodes = data.nodes.filter(n => n.full_path);
         
-        const initialEdges = data.edges.map(e => ({
-          id: e.id,
-          source: e.source,
-          target: e.target,
-          type: 'straight',
-          animated: false,
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#d1d5db', width: 15, height: 15 },
-          style: { stroke: '#e5e7eb', strokeWidth: 1.5, opacity: 0.6 }
-        }));
-
-        const nodeIds = new Set(initialNodes.map(n => n.id));
-        const simulationEdges = initialEdges
-          .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
-          .map(e => ({ ...e }));
+        // Build VFS
+        const root = buildVFS(validNodes);
+        const nodePathMap = buildNodePathMap(validNodes);
         
-        // Save to ref so drag handlers can access them
-        initialNodesRef.current = initialNodes;
-
-        // Setup D3 Force Simulation
-        const simulation = d3.forceSimulation(initialNodes)
-          .force('charge', d3.forceManyBody().strength(-400)) // Repel nodes
-          .force('center', d3.forceCenter(0, 0)) 
-          .force('collide', d3.forceCollide().radius(85)) // Larger collision radius to prevent pill overlaps
-          .force('x', d3.forceX(0).strength(0.1)) 
-          .force('y', d3.forceY(0).strength(0.1)) 
-          .force('link', d3.forceLink(simulationEdges).id(d => d.id).distance(100));
-          
-        simulationRef.current = simulation;
-
-        // Fast-forward the simulation so it appears stationary on load
-        simulation.tick(300);
-
-        // Map final D3 coordinates to React Flow positions
-        const updateReactFlowNodes = () => {
-          setNodes(initialNodes.map(n => ({
-            id: n.id,
-            type: 'custom',
-            data: n.data,
-            position: { x: isNaN(n.x) ? 0 : n.x, y: isNaN(n.y) ? 0 : n.y },
-          })));
-        };
+        // Filter edges where both source and target exist
+        const nodeIds = new Set(validNodes.map(n => n.id));
+        const validEdges = data.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
         
-        updateReactFlowNodes();
-        setEdges(initialEdges);
+        calculateVisualComplexity(root, validEdges, nodePathMap);
+        const initialExpanded = getAutoExpandedPaths(root);
         
-        // Listen to live ticks for when the user drags a node and wakes up physics
-        simulation.on('tick', () => {
-          if (!isMounted) return;
-          updateReactFlowNodes();
-        });
+        setVfsRoot(root);
+        setRawGraphData({ nodes: validNodes, edges: validEdges, nodePathMap });
+        setExpandedPaths(initialExpanded);
         
-        // Center view on the stationary graph
-        setTimeout(() => {
-          if (!isMounted || !rfInstance.current) return;
-          rfInstance.current.fitView({ padding: 0.2, duration: 800 });
-        }, 100);
-
       } catch (err) {
         if (isMounted) setError(err.message);
       } finally {
@@ -147,49 +175,66 @@ export default function DependencyGraph({ repoName }) {
     
     return () => {
       isMounted = false;
-      if (simulationRef.current) simulationRef.current.stop();
     };
   }, [repoName]); 
 
+  // Re-build visible graph when expansion state changes
+  useEffect(() => {
+    if (!vfsRoot || !rawGraphData) return;
+    
+    const { nodes: newNodes, edges: newEdges } = buildVisibleGraph(
+      vfsRoot, 
+      rawGraphData.nodes, 
+      rawGraphData.edges, 
+      rawGraphData.nodePathMap, 
+      expandedPaths,
+      nodes // pass existing nodes to preserve positions
+    );
+    
+    let positionedNodes = newNodes;
+    
+    // If we have an anchor, this was a manual expansion
+    if (expandAnchorIdRef.current) {
+      positionedNodes = applyLocalRelaxation(positionedNodes, expandAnchorIdRef.current, true);
+      expandAnchorIdRef.current = null;
+    } else {
+      // Global layout for initial load or search (only moves unpositioned/new nodes)
+      positionedNodes = layoutGraph(positionedNodes, newEdges, { direction: 'LR' });
+    }
+    
+    setNodes(positionedNodes);
+    setEdges(newEdges);
+    
+    // Center view only on initial load
+    if (nodes.length === 0) {
+      setTimeout(() => {
+        if (rfInstance.current) {
+          rfInstance.current.fitView({ padding: 0.2, duration: 800 });
+        }
+      }, 100);
+    }
+  }, [vfsRoot, rawGraphData, expandedPaths]);
+
   const onNodesChange = useCallback(
-    (changes) => setNodes((nds) => applyNodeChanges(changes, nds)),
+    (changes) => {
+      setNodes((nds) => {
+        let updatedNodes = applyNodeChanges(changes, nds);
+        
+        const dragChange = changes.find(c => c.type === 'position' && c.dragging);
+        if (dragChange) {
+          updatedNodes = applyLocalRelaxation(updatedNodes, dragChange.id, false);
+        }
+        
+        return updatedNodes;
+      });
+    },
     []
   );
+  
   const onEdgesChange = useCallback(
     (changes) => setEdges((eds) => applyEdgeChanges(changes, eds)),
     []
   );
-
-  // Wire up React Flow Drag events to D3 physics
-  const onNodeDragStart = useCallback((_, node) => {
-    if (!simulationRef.current) return;
-    const simNode = initialNodesRef.current.find(n => n.id === node.id);
-    if (simNode) {
-      simNode.fx = simNode.x;
-      simNode.fy = simNode.y;
-      simulationRef.current.alphaTarget(0.3).restart(); // Wake up physics
-    }
-  }, []);
-
-  const onNodeDrag = useCallback((_, node) => {
-    if (!simulationRef.current) return;
-    const simNode = initialNodesRef.current.find(n => n.id === node.id);
-    if (simNode) {
-      // Pin the node to the mouse position
-      simNode.fx = node.position.x;
-      simNode.fy = node.position.y;
-    }
-  }, []);
-
-  const onNodeDragStop = useCallback((_, node) => {
-    if (!simulationRef.current) return;
-    const simNode = initialNodesRef.current.find(n => n.id === node.id);
-    if (simNode) {
-      simNode.fx = null;
-      simNode.fy = null;
-      simulationRef.current.alphaTarget(0); // Let physics cool down and stabilize again
-    }
-  }, []);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -205,6 +250,24 @@ export default function DependencyGraph({ repoName }) {
 
   const onNodeClick = useCallback((_, node) => {
     setSelectedNode(node.id);
+    
+    // Handle Folder Expansion/Collapse
+    if (node.type === 'folderNode') {
+      const path = node.data.path;
+      
+      setExpandedPaths(prev => {
+        const next = new Set(prev);
+        if (next.has(path)) {
+          next.delete(path);
+          // When collapsing, we don't need a click coordinate because nodes are disappearing
+        } else {
+          next.add(path);
+          // Store ID so the local layout spawns children here and anchors the parent
+          expandAnchorIdRef.current = node.id;
+        }
+        return next;
+      });
+    }
   }, []);
 
   const onPaneClick = useCallback(() => {
@@ -214,33 +277,77 @@ export default function DependencyGraph({ repoName }) {
   // Compute styles dynamically for selection effects
   const renderedEdges = useMemo(() => {
     return edges.map(e => {
-      if (!selectedNode) {
-        return {
-          ...e,
-          style: { stroke: '#cbd5e1', strokeWidth: 1.5, opacity: 0.8 },
-          animated: false,
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 20, height: 20 },
-          zIndex: 0
-        };
+      const isSelectedNodeConnected = selectedNode && (e.source === selectedNode || e.target === selectedNode);
+      
+      const isAggregate = e.type === 'aggregateEdge';
+      
+      let stroke = '#cbd5e1';
+      let opacity = 0.15;
+      let strokeWidth = isAggregate ? 2 : 1;
+      
+      if (selectedNode) {
+        if (isSelectedNodeConnected) {
+          stroke = '#6366f1';
+          opacity = 1;
+          strokeWidth = isAggregate ? 3 : 2;
+        } else {
+          opacity = 0.05; // heavily subdue unrelated edges
+        }
+      } else {
+        // Default unselected state
+        opacity = 0.4;
       }
       
-      const isConnected = e.source === selectedNode || e.target === selectedNode;
       return {
         ...e,
-        style: { 
-          stroke: isConnected ? '#6366f1' : '#e2e8f0', // darker gray for non-connected
-          strokeWidth: isConnected ? 3 : 1, 
-          opacity: isConnected ? 1 : 0.3 // slightly higher opacity for non-connected
-        },
-        animated: isConnected,
-        markerEnd: { type: MarkerType.ArrowClosed, color: isConnected ? '#6366f1' : '#e2e8f0', width: 20, height: 20 },
-        zIndex: isConnected ? 10 : 0
+        style: { stroke, strokeWidth, opacity },
+        animated: isSelectedNodeConnected && !isAggregate,
+        markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 20, height: 20 },
+        zIndex: isSelectedNodeConnected ? 10 : 0
       };
     });
   }, [edges, selectedNode]);
 
+  const handleSearch = (e) => {
+    e.preventDefault();
+    if (!searchQuery || !rawGraphData) return;
+    
+    const query = searchQuery.toLowerCase();
+    
+    // Find file in raw nodes
+    const foundNode = rawGraphData.nodes.find(n => 
+      n.full_path.toLowerCase().includes(query) || n.id.toLowerCase().includes(query)
+    );
+    
+    if (foundNode) {
+      // Find its path and expand all ancestors
+      const path = rawGraphData.nodePathMap.get(foundNode.id);
+      if (path) {
+        const parts = path.split('/');
+        setExpandedPaths(prev => {
+          const next = new Set(prev);
+          let currentPath = '';
+          // We don't expand the file itself, just its parent folders
+          for (let i = 0; i < parts.length - 1; i++) {
+            currentPath = currentPath === '' ? parts[i] : `${currentPath}/${parts[i]}`;
+            next.add(currentPath);
+          }
+          return next;
+        });
+        
+        // Wait for render, then center
+        setTimeout(() => {
+          if (rfInstance.current) {
+            rfInstance.current.fitView({ nodes: [{ id: foundNode.id }], duration: 800, padding: 0.5 });
+            setSelectedNode(foundNode.id);
+          }
+        }, 200);
+      }
+    }
+  };
+
   if (isLoading) {
-    return <div className="h-full flex items-center justify-center text-gray-500">Generating graph layout...</div>;
+    return <div className="h-full flex items-center justify-center text-gray-500">Building Virtual File System...</div>;
   }
 
   if (error) {
@@ -260,11 +367,9 @@ export default function DependencyGraph({ repoName }) {
         nodes={nodes}
         edges={renderedEdges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeDragStart={onNodeDragStart}
-        onNodeDrag={onNodeDrag}
-        onNodeDragStop={onNodeDragStop}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         onInit={(instance) => { rfInstance.current = instance; }}
@@ -274,15 +379,23 @@ export default function DependencyGraph({ repoName }) {
       >
         <Background color="#f3f4f6" gap={20} size={1} />
         
-        {/* Integrated Controls */}
-        <Controls showInteractive={false} showFitView={false} position="bottom-right">
+        <Controls showInteractive={false} showFitView={true} position="bottom-right">
           <ControlButton onClick={toggleFullscreen} title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>
             {isFullscreen ? "↙️" : "↗️"}
           </ControlButton>
         </Controls>
         
-        <Panel position="top-left" className="bg-white/90 shadow-sm border border-gray-100 px-3 py-1.5 rounded-full text-xs font-semibold text-gray-600 pointer-events-none">
-          {nodes.length} Files | {edges.length} Dependencies
+        <Panel position="top-left" className="bg-white/90 shadow-sm border border-gray-100 p-2 rounded-lg flex flex-col pointer-events-auto">
+          <form onSubmit={handleSearch} className="flex gap-2">
+            <input 
+              type="text" 
+              placeholder="Search file..." 
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              className="text-xs px-2 py-1 border border-gray-200 rounded outline-none focus:border-indigo-500 w-48"
+            />
+            <button type="submit" className="bg-indigo-50 text-indigo-600 px-2 py-1 rounded text-xs font-semibold hover:bg-indigo-100">Find</button>
+          </form>
         </Panel>
       </ReactFlow>
     </div>

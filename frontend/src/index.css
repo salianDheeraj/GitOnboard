@@ -25,3 +25,5 @@
     color: var(--color-gray-900);
   }
 }
+.react-flow__edge { pointer-events: none !important; }  
+ 
