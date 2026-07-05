@@ -131,6 +131,23 @@ export default function DependencyGraph({ repoName }) {
   const containerRef = useRef(null);
   const rfInstance = useRef(null);
   const expandAnchorIdRef = useRef(null);
+  
+  // History State
+  const [history, setHistory] = useState([]);
+  const [currentStep, setCurrentStep] = useState(-1);
+  const isRestoringHistory = useRef(false);
+
+  const saveHistory = useCallback((currentExpandedPaths, currentNodes) => {
+    setHistory(prev => {
+      const newHistory = prev.slice(0, currentStep + 1);
+      const snapshot = {
+        expandedPaths: new Set(currentExpandedPaths),
+        nodes: currentNodes.map(n => ({...n, position: {...n.position}}))
+      };
+      return [...newHistory, snapshot];
+    });
+    setCurrentStep(prev => prev + 1);
+  }, [currentStep]);
 
   useEffect(() => {
     let isMounted = true;
@@ -182,6 +199,21 @@ export default function DependencyGraph({ repoName }) {
   useEffect(() => {
     if (!vfsRoot || !rawGraphData) return;
     
+    if (isRestoringHistory.current) {
+      // Skip layout algorithms when restoring history, just rebuild edges
+      const { edges: newEdges } = buildVisibleGraph(
+        vfsRoot, 
+        rawGraphData.nodes, 
+        rawGraphData.edges, 
+        rawGraphData.nodePathMap, 
+        expandedPaths,
+        nodes 
+      );
+      setEdges(newEdges);
+      isRestoringHistory.current = false;
+      return;
+    }
+
     const { nodes: newNodes, edges: newEdges } = buildVisibleGraph(
       vfsRoot, 
       rawGraphData.nodes, 
@@ -204,6 +236,9 @@ export default function DependencyGraph({ repoName }) {
     
     setNodes(positionedNodes);
     setEdges(newEdges);
+    
+    // Save history after a structural layout change
+    saveHistory(expandedPaths, positionedNodes);
     
     // Center view only on initial load
     if (nodes.length === 0) {
@@ -235,6 +270,33 @@ export default function DependencyGraph({ repoName }) {
     (changes) => setEdges((eds) => applyEdgeChanges(changes, eds)),
     []
   );
+
+  const onNodeDragStop = useCallback(() => {
+    // Save history after dragging
+    saveHistory(expandedPaths, nodes);
+  }, [expandedPaths, nodes, saveHistory]);
+
+  const handleUndo = useCallback(() => {
+    if (currentStep > 0) {
+      const prevStep = currentStep - 1;
+      const snapshot = history[prevStep];
+      isRestoringHistory.current = true;
+      setExpandedPaths(snapshot.expandedPaths);
+      setNodes(snapshot.nodes);
+      setCurrentStep(prevStep);
+    }
+  }, [currentStep, history]);
+
+  const handleRedo = useCallback(() => {
+    if (currentStep < history.length - 1) {
+      const nextStep = currentStep + 1;
+      const snapshot = history[nextStep];
+      isRestoringHistory.current = true;
+      setExpandedPaths(snapshot.expandedPaths);
+      setNodes(snapshot.nodes);
+      setCurrentStep(nextStep);
+    }
+  }, [currentStep, history]);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -376,12 +438,39 @@ export default function DependencyGraph({ repoName }) {
         minZoom={0.05}
         maxZoom={2.5}
         nodesDraggable={true}
+        onNodeDragStop={onNodeDragStop}
       >
         <Background color="#f3f4f6" gap={20} size={1} />
         
         <Controls showInteractive={false} showFitView={true} position="bottom-right">
+          <ControlButton onClick={handleUndo} disabled={currentStep <= 0} title="Undo">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '14px', height: '14px', opacity: currentStep <= 0 ? 0.3 : 1 }}>
+              <path d="M3 7v6h6" />
+              <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+            </svg>
+          </ControlButton>
+          <ControlButton onClick={handleRedo} disabled={currentStep >= history.length - 1} title="Redo">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '14px', height: '14px', opacity: currentStep >= history.length - 1 ? 0.3 : 1 }}>
+              <path d="M21 7v6h-6" />
+              <path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7" />
+            </svg>
+          </ControlButton>
           <ControlButton onClick={toggleFullscreen} title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>
-            {isFullscreen ? "↙️" : "↗️"}
+            {isFullscreen ? (
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '14px', height: '14px' }}>
+                <path d="M4 14h6v6" />
+                <path d="M20 10h-6V4" />
+                <path d="M14 10l7-7" />
+                <path d="M3 21l7-7" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '14px', height: '14px' }}>
+                <path d="M15 3h6v6" />
+                <path d="M9 21H3v-6" />
+                <path d="M21 3l-7 7" />
+                <path d="M3 21l7-7" />
+              </svg>
+            )}
           </ControlButton>
         </Controls>
         
