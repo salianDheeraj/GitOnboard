@@ -33,14 +33,13 @@ Repository Intelligence Platform is a FastAPI + React MVP for importing GitHub r
 Backend:
 
 ```bash
-cd F:\GitOnboard
 uv run uvicorn backend.main:app --reload
 ```
 
 Frontend:
 
 ```bash
-cd F:\GitOnboard\frontend
+cd frontend
 npm install
 npm run dev
 ```
@@ -49,3 +48,11 @@ npm run dev
 
 - [Project Setup](setup.md)
 - [Architecture and Progress](architecture.md)
+
+## Contributing
+
+If you plan to contribute to this repository, please configure Git to rebase on pull:
+
+```bash
+git config pull.rebase true
+```

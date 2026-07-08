@@ -20,7 +20,6 @@ This guide explains how to set up Repository Intelligence Platform locally, star
 The backend is managed with `uv`.
 
 ```bash
-cd F:\GitOnboard
 uv sync
 uv run uvicorn backend.main:app --reload
 ```
@@ -32,7 +31,7 @@ Run the backend from the repository root so Python can resolve the local `backen
 ## Frontend Setup
 
 ```bash
-cd F:\GitOnboard\frontend
+cd frontend
 npm install
 npm run dev
 ```
@@ -84,3 +83,4 @@ curl http://localhost:11434/api/tags
 - The project does not currently require a populated `.env` file.
 - Repository metadata is stored locally in `data/repos_metadata.json`.
 - Imported repositories are cloned into `data/repos/`.
+- If you plan to contribute, configure Git to rebase on pull: `git config pull.rebase true`
