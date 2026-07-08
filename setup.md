@@ -20,17 +20,19 @@ This guide explains how to set up Repository Intelligence Platform locally, star
 The backend is managed with `uv`.
 
 ```bash
-cd /home/dheeraj/repository_intelligence_platform
+cd F:\GitOnboard
 uv sync
 uv run uvicorn backend.main:app --reload
 ```
 
 The API starts on `http://127.0.0.1:8000` by default.
 
+Run the backend from the repository root so Python can resolve the local `backend` package. If your terminal is already inside `frontend/`, run `Set-Location ..` first.
+
 ## Frontend Setup
 
 ```bash
-cd /home/dheeraj/repository_intelligence_platform/frontend
+cd F:\GitOnboard\frontend
 npm install
 npm run dev
 ```

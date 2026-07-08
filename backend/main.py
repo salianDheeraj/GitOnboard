@@ -78,13 +78,19 @@ def import_repo(req: ImportRequest):
     env["GIT_TERMINAL_PROMPT"] = "0"
     
     try:
-        subprocess.run(
-            ["git", "clone", repo_url, str(target_dir)],
-            check=True,
+        result = subprocess.run(
+            ["git", "clone", "-c", "core.longpaths=true", repo_url, str(target_dir)],
             capture_output=True,
             text=True,
             env=env
         )
+        if result.returncode != 0:
+            if "Clone succeeded, but checkout failed" in result.stderr or "Clone succeeded, but checkout failed" in result.stdout:
+                logger.warning(f"Clone succeeded with checkout errors: {result.stderr}")
+            else:
+                logger.error(f"Failed to clone repository: {result.stderr}")
+                raise HTTPException(status_code=500, detail=f"Failed to clone repository: {result.stderr}")
+        
         logger.info(f"Successfully cloned {repo_name}")
         
         # Phase 1 constraint: Ignore directories during processing (by removing them)
@@ -92,7 +98,7 @@ def import_repo(req: ImportRequest):
         for d in ignored_dirs:
             p = target_dir / d
             if p.exists() and p.is_dir():
-                shutil.rmtree(p)
+                shutil.rmtree(p, ignore_errors=True)
                 logger.info(f"Removed ignored directory: {p}")
         
         # Save metadata
@@ -106,9 +112,11 @@ def import_repo(req: ImportRequest):
         save_metadata(metadata)
         
         return {"message": "Repository imported successfully", "repo": repo_name}
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to clone repository: {e.stderr}")
-        raise HTTPException(status_code=500, detail=f"Failed to clone repository: {e.stderr}")
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        logger.error(f"Failed to process repository: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process repository: {str(e)}")
 
 @app.get("/api/repos")
 def list_repos():
@@ -124,7 +132,7 @@ def delete_repo(repo_name: str):
         raise HTTPException(status_code=404, detail="Repository not found")
         
     try:
-        shutil.rmtree(target_dir)
+        shutil.rmtree(target_dir, ignore_errors=True)
         metadata = load_metadata()
         if repo_name in metadata:
             del metadata[repo_name]
