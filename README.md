@@ -51,7 +51,7 @@ npm run dev
 
 ## Contributing
 
-If you plan to contribute to this repository, please configure Git to rebase on pull:
+If you plan to contribute to this repository, please review [CONTRIBUTING.md](CONTRIBUTING.md) for details on setting up Git hooks to prevent stale pull requests. You should also configure Git to rebase on pull:
 
 ```bash
 git config pull.rebase true

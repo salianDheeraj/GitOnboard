@@ -1,0 +1,65 @@
+#!/bin/sh
+
+# pre-push hook to prevent pushing stale code
+# It ensures the current branch is not behind upstream/origin target branches.
+
+echo "Running pre-push hook: checking for stale branch..."
+
+# Determine current branch
+current_branch=$(git symbolic-ref HEAD --short 2>/dev/null)
+if [ -z "$current_branch" ]; then
+    echo "Not on any branch. Skipping pre-push check."
+    exit 0
+fi
+
+# Define the base branch you want to check against (e.g. main or master)
+# You could potentially deduce this dynamically, but 'main' is standard.
+BASE_BRANCH="main"
+
+# Fetch latest from remotes in the background
+echo "Fetching latest changes from remotes..."
+git fetch origin "$BASE_BRANCH" --quiet 2>/dev/null || true
+
+HAS_UPSTREAM=0
+if git remote | grep -q "^upstream$"; then
+    HAS_UPSTREAM=1
+    git fetch upstream "$BASE_BRANCH" --quiet 2>/dev/null || true
+fi
+
+# Function to check if we are behind a specific remote branch
+check_behind() {
+    local remote_ref="$1"
+    
+    # Check if the remote ref actually exists locally after fetch
+    if ! git rev-parse --verify "$remote_ref" >/dev/null 2>&1; then
+        return 0
+    fi
+    
+    # Count commits that are in remote_ref but NOT in HEAD
+    missing_commits=$(git rev-list HEAD.."$remote_ref" --count)
+    
+    if [ "$missing_commits" -gt 0 ]; then
+        echo ""
+        echo "❌ ERROR: Stale Branch Detected!"
+        echo "Your branch '$current_branch' is behind '$remote_ref' by $missing_commits commit(s)."
+        echo "Push rejected to prevent stale code conflicts."
+        echo ""
+        echo "To fix this, update your branch:"
+        echo "  git pull --rebase ${remote_ref%/*} ${remote_ref#*/}"
+        echo "    - or - "
+        echo "  git merge $remote_ref"
+        echo ""
+        exit 1
+    fi
+}
+
+# Check against origin
+check_behind "origin/$BASE_BRANCH"
+
+# Check against upstream if it exists
+if [ "$HAS_UPSTREAM" -eq 1 ]; then
+    check_behind "upstream/$BASE_BRANCH"
+fi
+
+echo "✅ Branch is up to date. Proceeding with push."
+exit 0
