@@ -7,6 +7,9 @@ import Search from '../components/Search'
 import SemanticSearch from '../components/SemanticSearch'
 import RepositorySummary from '../components/RepositorySummary'
 import SymbolExplorer from '../components/SymbolExplorer'
+import RepositoryHealth from '../components/RepositoryHealth'
+import RepositoryMetrics from '../components/RepositoryMetrics'
+import RepositoryAnalysis from '../components/RepositoryAnalysis'
 
 // Recursive component for rendering the folder hierarchy
 const TreeNode = ({ node, onFileClick, selectedPath }) => {
@@ -174,6 +177,24 @@ export default function RepositoryDetails() {
           >
             📝 Summary
           </button>
+          <button 
+            onClick={() => setActiveTab('health')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'health' ? 'bg-white shadow-sm text-green-700 border border-green-100' : 'text-green-500 hover:text-green-700'}`}
+          >
+            ✨ Health
+          </button>
+          <button 
+            onClick={() => setActiveTab('metrics')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'metrics' ? 'bg-white shadow-sm text-teal-700 border border-teal-100' : 'text-teal-500 hover:text-teal-700'}`}
+          >
+            📊 Metrics
+          </button>
+          <button 
+            onClick={() => setActiveTab('analysis')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'analysis' ? 'bg-white shadow-sm text-red-700 border border-red-100' : 'text-red-500 hover:text-red-700'}`}
+          >
+            🔬 Analysis
+          </button>
         </div>
       </div>
 
@@ -204,6 +225,18 @@ export default function RepositoryDetails() {
       ) : activeTab === 'symbols' ? (
         <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-6">
           <SymbolExplorer repoName={repoName} />
+        </div>
+      ) : activeTab === 'health' ? (
+        <div className="flex-grow overflow-hidden bg-gray-50 rounded-lg p-0">
+          <RepositoryHealth repoName={repoName} />
+        </div>
+      ) : activeTab === 'metrics' ? (
+        <div className="flex-grow overflow-hidden bg-gray-50 rounded-lg p-0">
+          <RepositoryMetrics repoName={repoName} />
+        </div>
+      ) : activeTab === 'analysis' ? (
+        <div className="flex-grow overflow-hidden bg-gray-50 rounded-lg p-0">
+          <RepositoryAnalysis repoName={repoName} />
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-grow overflow-hidden pb-8">

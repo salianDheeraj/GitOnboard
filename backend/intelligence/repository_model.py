@@ -105,9 +105,11 @@ class RepositoryRelationships:
 class RepositoryAnalyses:
     metrics: Optional[Dict[str, Any]] = None
     embeddings: Optional[Any] = None
-    # Future placeholders
-    # architecture: Optional[Any] = None
-    # health: Optional[Any] = None
+    architecture: Optional[Dict[str, Any]] = None
+    dependency_graph: Optional[Any] = None
+    cycles: Optional[List[Any]] = None
+    health: Optional[Any] = None
+    findings: Optional[List[Any]] = None
 
 @dataclass
 class AnalysisStatus:
@@ -115,6 +117,11 @@ class AnalysisStatus:
     relationships: bool = False
     metrics: bool = False
     embeddings: bool = False
+    architecture: bool = False
+    dependencies: bool = False
+    cycles: bool = False
+    health: bool = False
+    findings: bool = False
 
 @dataclass
 class RepositoryModel:

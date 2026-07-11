@@ -150,6 +150,12 @@ from backend.intelligence import (
 from backend.intelligence.stages.metrics_stage import MetricsStage
 from backend.intelligence.graphs.call_graph import CallGraphView
 from backend.intelligence.graphs.dependency_graph import DependencyGraphView
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from analysis.registry import AnalyzerRegistry
+from analysis.runner import AnalysisRunner
 
 _model_cache = {}
 
@@ -177,6 +183,15 @@ def get_or_build_model(repo_name: str) -> QueryLayer:
     pipeline.add_stage(MetricsStage())
     
     model = pipeline.run()
+    
+    # Phase 2 Analyzers
+    registry = AnalyzerRegistry()
+    registry.discover("analysis.plugins")
+    
+    runner = AnalysisRunner(registry)
+    report = runner.run(model)
+    model.analyses.findings = report.overall_findings
+    
     query_layer = QueryLayer(model)
     _model_cache[repo_name] = query_layer
     return query_layer
@@ -453,8 +468,6 @@ def semantic_index_repo(repo_name: str):
         except Exception:
             state = {}
             
-    from chromadb.api.shared_system_client import SharedSystemClient
-    SharedSystemClient.clear_system_cache()
     client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
     collection = client.get_or_create_collection(name="semantic_index")
     
@@ -567,8 +580,6 @@ def semantic_search_repo(repo_name: str, q: str):
         semantic_index_repo(repo_name)
         
     try:
-        from chromadb.api.shared_system_client import SharedSystemClient
-        SharedSystemClient.clear_system_cache()
         client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
         collection = client.get_collection(name="semantic_index")
     except Exception as e:
@@ -621,3 +632,101 @@ def graph_query(repo_name: str, req: GraphQueryRequest):
     return result
 
 
+
+# Dashboard API Endpoints
+
+
+import dataclasses
+from enum import Enum
+
+def _serialize_dataclass(obj):
+    if dataclasses.is_dataclass(obj):
+        return {k: _serialize_dataclass(v) for k, v in dataclasses.asdict(obj).items()}
+    elif isinstance(obj, Enum):
+        return obj.value
+    elif isinstance(obj, dict):
+        return {k: _serialize_dataclass(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_serialize_dataclass(v) for v in obj]
+    return obj
+
+@app.get("/api/repos/{repo_name}/health/scores")
+def get_health_scores(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    health = getattr(query_layer.model.analyses, "health", None)
+    if not health:
+        raise HTTPException(status_code=404, detail="Health scores not found")
+    return _serialize_dataclass(health)
+
+@app.get("/api/repos/{repo_name}/health/metrics")
+def get_health_metrics(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    metrics = getattr(query_layer.model.analyses, "metrics", None)
+    if not metrics:
+        raise HTTPException(status_code=404, detail="Metrics not found")
+    return _serialize_dataclass(metrics)
+
+@app.get("/api/repos/{repo_name}/health/findings")
+def get_health_findings(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    findings = getattr(query_layer.model.analyses, "findings", [])
+    return {"findings": _serialize_dataclass(findings)}
+
+@app.get("/api/repos/{repo_name}/health/layers")
+def get_health_layers(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    architecture = getattr(query_layer.model.analyses, "architecture", {})
+    layers = [{"module_id": k, "layer": _serialize_dataclass(v)} for k, v in architecture.items()]
+    return {"layers": layers}
+
+@app.get("/api/repos/{repo_name}/health/dependencies")
+def get_health_dependencies(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    dep_graph = getattr(query_layer.model.analyses, "dependency_graph", None)
+    if not dep_graph:
+        return {"edges": []}
+    
+    edges = getattr(dep_graph, "edges", None) or []
+    return {"edges": _serialize_dataclass(edges)}
+
+@app.get("/api/repos/{repo_name}/health/cycles")
+def get_health_cycles(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    cycles = getattr(query_layer.model.analyses, "cycles", None) or []
+    return {"cycles": _serialize_dataclass(cycles)}
+
+@app.get("/api/repos/{repo_name}/health/dead-code")
+def get_health_dead_code(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    findings = getattr(query_layer.model.analyses, "findings", None) or []
+    dead_code = [f for f in findings if "Unused" in f.title or "Unreachable" in f.title]
+    return {"findings": _serialize_dataclass(dead_code)}
+
+@app.get("/api/repos/{repo_name}/health/smells")
+def get_health_smells(repo_name: str):
+    query_layer = get_or_build_model(repo_name)
+    cycles = getattr(query_layer.model.analyses, "cycles", None) or []
+    findings = getattr(query_layer.model.analyses, "findings", None) or []
+    
+    smells = []
+    # Add cycles as smells
+    for c in cycles:
+        smells.append({
+            "type": "Cycle",
+            "severity": _serialize_dataclass(c.severity),
+            "description": c.description,
+            "members": c.members
+        })
+        
+    # Add high severity findings as smells
+    from analysis.models.severity import Severity
+    for f in findings:
+        if f.severity in (Severity.ERROR, Severity.CRITICAL):
+            smells.append({
+                "type": "Finding",
+                "severity": _serialize_dataclass(f.severity),
+                "description": f.description,
+                "file_path": f.file_path
+            })
+            
+    return {"smells": smells}
