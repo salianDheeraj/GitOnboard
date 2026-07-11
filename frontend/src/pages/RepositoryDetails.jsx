@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import DependencyGraph from '../components/DependencyGraph'
-import CallGraph from '../components/CallGraph'
+import CallExplorer from '../components/CallExplorer'
 import ArchitectureExplorer from '../components/ArchitectureExplorer'
 import Search from '../components/Search'
 import SemanticSearch from '../components/SemanticSearch'
@@ -148,7 +148,7 @@ export default function RepositoryDetails() {
             onClick={() => setActiveTab('callgraph')}
             className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === 'callgraph' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}
           >
-            Call Graph
+            Call Explorer
           </button>
           <button 
             onClick={() => setActiveTab('search')}
@@ -187,7 +187,7 @@ export default function RepositoryDetails() {
         </div>
       ) : activeTab === 'callgraph' ? (
         <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-0">
-          <CallGraph repoName={repoName} />
+          <CallExplorer repoName={repoName} />
         </div>
       ) : activeTab === 'search' ? (
         <div className="flex-grow overflow-hidden bg-white rounded-lg shadow-sm border border-gray-200 p-6">
