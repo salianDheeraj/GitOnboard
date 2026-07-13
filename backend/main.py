@@ -584,23 +584,48 @@ def semantic_index_repo(repo_name: str, background_tasks: BackgroundTasks):
             metadatas = []
             ids = []
             import uuid
-            import ast
+            from backend.intelligence.parser import LanguageParser
+            parser = LanguageParser()
+            
             for rel_str in files_to_process:
                 pf = target_dir / rel_str
+                ext = pf.suffix.lower()
+                if not parser.supports_extension(ext):
+                    continue
+                    
                 try:
                     with open(pf, "r", encoding="utf-8") as f:
                         source = f.read()
-                    tree = ast.parse(source)
-                    for node in tree.body:
-                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                            segment = ast.get_source_segment(source, node)
-                            if not segment: continue
-                            element_type = "class" if isinstance(node, ast.ClassDef) else "function"
-                            documents.append(segment)
+                    tree, _ = parser.parse_source(source, ext)
+                    parsed_entities = parser.extract_entities(tree, source, rel_str, "")
+                    
+                    for cls in parsed_entities.get("classes", []):
+                        if cls.get("source_segment"):
+                            documents.append(cls["source_segment"])
                             metadatas.append({
                                 "file_path": rel_str,
-                                "type": element_type,
-                                "name": node.name
+                                "type": "class",
+                                "name": cls["name"]
+                            })
+                            ids.append(str(uuid.uuid4()))
+                            
+                    for fn in parsed_entities.get("functions", []):
+                        if fn.get("source_segment"):
+                            documents.append(fn["source_segment"])
+                            metadatas.append({
+                                "file_path": rel_str,
+                                "type": "function",
+                                "name": fn["name"]
+                            })
+                            ids.append(str(uuid.uuid4()))
+                            
+                    for md in parsed_entities.get("methods", []):
+                        if md.get("source_segment"):
+                            documents.append(md["source_segment"])
+                            metadatas.append({
+                                "file_path": rel_str,
+                                "type": "function",
+                                "name": md["name"]
                             })
                             ids.append(str(uuid.uuid4()))
                 except Exception:

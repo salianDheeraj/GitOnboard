@@ -10,6 +10,7 @@ from .repository_model import (
     FileNode, DirectoryNode, ModuleNode, ClassNode, FunctionNode,
     MethodNode, VariableNode, ImportNode
 )
+from .parser import LanguageParser
 
 def generate_fingerprint(target_dir: Path) -> str:
     # A simple fingerprint using modified time of the top directory or just a static one for MVP
@@ -26,6 +27,7 @@ class RepositoryBuilder:
         self.repo_name = repo_name
         self.target_dir = target_dir
         self.ignored_dirs = {".git", "node_modules", "venv", "build", "dist", "__pycache__"}
+        self.parser = LanguageParser()
 
     def build(self) -> RepositoryModel:
         metadata = RepositoryMetadata(
@@ -74,18 +76,21 @@ class RepositoryBuilder:
                     is_python=is_python
                 )
                 
-                if is_python:
-                    self._parse_python_file(pf, file_id, entities)
+                if self.parser.supports_extension(ext):
+                    self._parse_file(pf, file_id, ext, entities)
                     
         return RepositoryModel(metadata=metadata, entities=entities)
 
-    def _parse_python_file(self, pf: Path, file_id: str, entities: RepositoryEntities):
+    def _parse_file(self, pf: Path, file_id: str, ext: str, entities: RepositoryEntities):
         # Determine module id
         parts = list(pf.relative_to(self.target_dir).parts)
-        if parts[-1] == "__init__.py":
-            parts = parts[:-1]
+        if ext == ".py":
+            if parts[-1] == "__init__.py":
+                parts = parts[:-1]
+            else:
+                parts[-1] = parts[-1][:-3]
         else:
-            parts[-1] = parts[-1][:-3]
+            parts[-1] = parts[-1].rsplit(".", 1)[0]
             
         module_name = ".".join(parts) if parts else ""
         module_id = module_name
@@ -100,76 +105,34 @@ class RepositoryBuilder:
         try:
             with open(pf, "r", encoding="utf-8") as f:
                 source = f.read()
-            tree = ast.parse(source)
+            tree, _ = self.parser.parse_source(source, ext)
+            parsed_entities = self.parser.extract_entities(tree, source, file_id, module_id)
             
-            for node in tree.body:
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        imp_id = f"{file_id}::import::{alias.name}"
-                        entities.imports[imp_id] = ImportNode(
-                            id=imp_id,
-                            file_id=file_id,
-                            module_name=alias.name,
-                            alias=alias.asname
-                        )
-                elif isinstance(node, ast.ImportFrom):
-                    mod = node.module or ""
-                    for alias in node.names:
-                        imported_name = f"{mod}.{alias.name}" if mod else alias.name
-                        imp_id = f"{file_id}::import::{imported_name}"
-                        entities.imports[imp_id] = ImportNode(
-                            id=imp_id,
-                            file_id=file_id,
-                            module_name=imported_name,
-                            alias=alias.asname
-                        )
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    fn_id = f"{module_id}::{node.name}" if module_id else f"{file_id}::{node.name}"
-                    params = [arg.arg for arg in node.args.args] if hasattr(node, "args") else []
-                    entities.functions[fn_id] = FunctionNode(
-                        id=fn_id,
-                        name=node.name,
-                        file_id=file_id,
-                        module_id=module_id,
-                        line_number=getattr(node, "lineno", 0),
-                        docstring=ast.get_docstring(node) or "",
-                        parameters=params,
-                        is_async=isinstance(node, ast.AsyncFunctionDef)
-                    )
-                elif isinstance(node, ast.ClassDef):
-                    cls_id = f"{module_id}::{node.name}" if module_id else f"{file_id}::{node.name}"
-                    entities.classes[cls_id] = ClassNode(
-                        id=cls_id,
-                        name=node.name,
-                        file_id=file_id,
-                        module_id=module_id,
-                        line_number=getattr(node, "lineno", 0),
-                        docstring=ast.get_docstring(node) or ""
-                    )
-                    for class_node in node.body:
-                        if isinstance(class_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            method_id = f"{cls_id}.{class_node.name}"
-                            params = [arg.arg for arg in class_node.args.args] if hasattr(class_node, "args") else []
-                            entities.methods[method_id] = MethodNode(
-                                id=method_id,
-                                name=class_node.name,
-                                class_id=cls_id,
-                                file_id=file_id,
-                                module_id=module_id,
-                                line_number=getattr(class_node, "lineno", 0),
-                                docstring=ast.get_docstring(class_node) or "",
-                                parameters=params,
-                                is_async=isinstance(class_node, ast.AsyncFunctionDef)
-                            )
-                elif isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            var_id = f"{module_id}::{target.id}" if module_id else f"{file_id}::{target.id}"
-                            entities.variables[var_id] = VariableNode(
-                                id=var_id,
-                                name=target.id,
-                                file_id=file_id,
-                                line_number=getattr(node, "lineno", 0)
-                            )
+            for imp in parsed_entities["imports"]:
+                imp_id = f"{file_id}::import::{imp['module_name']}"
+                entities.imports[imp_id] = ImportNode(
+                    id=imp_id, file_id=file_id,
+                    module_name=imp["module_name"], alias=imp["alias"]
+                )
+            for cls in parsed_entities["classes"]:
+                entities.classes[cls["id"]] = ClassNode(
+                    id=cls["id"], name=cls["name"], file_id=file_id,
+                    module_id=module_id, line_number=cls["line_number"], docstring=cls["docstring"]
+                )
+            for fn in parsed_entities["functions"]:
+                entities.functions[fn["id"]] = FunctionNode(
+                    id=fn["id"], name=fn["name"], file_id=file_id, module_id=module_id,
+                    line_number=fn["line_number"], docstring=fn["docstring"], parameters=fn["parameters"], is_async=fn["is_async"]
+                )
+            for md in parsed_entities["methods"]:
+                entities.methods[md["id"]] = MethodNode(
+                    id=md["id"], name=md["name"], class_id=md["class_id"], file_id=file_id,
+                    module_id=module_id, line_number=md["line_number"], docstring=md["docstring"], parameters=md["parameters"], is_async=md["is_async"]
+                )
+            for vr in parsed_entities["variables"]:
+                entities.variables[vr["id"]] = VariableNode(
+                    id=vr["id"], name=vr["name"], file_id=file_id, line_number=vr["line_number"]
+                )
+                
         except Exception as e:
             pass
