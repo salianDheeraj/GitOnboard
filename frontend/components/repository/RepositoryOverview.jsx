@@ -5,6 +5,7 @@ import { Card, CardHeader } from '../common/Card';
 import { Badge } from '../common/Badge';
 import { Button } from '../common/Button';
 import Link from 'next/link';
+import { PythonIcon, JavascriptIcon, TypescriptIcon, ReactIcon, JavaIcon } from '../common/LanguageIcons';
 import { 
   Star, 
   GitBranch, 
@@ -22,6 +23,17 @@ import {
   Share2,
   Search
 } from 'lucide-react';
+
+const getLanguageConfig = (lang) => {
+  switch (lang) {
+    case 'Python': return { bg: 'bg-blue-500', Icon: PythonIcon };
+    case 'JavaScript': return { bg: 'bg-yellow-500', Icon: JavascriptIcon };
+    case 'TypeScript': return { bg: 'bg-blue-600', Icon: TypescriptIcon };
+    case 'React': return { bg: 'bg-cyan-500', Icon: ReactIcon };
+    case 'Java': return { bg: 'bg-red-500', Icon: JavaIcon };
+    default: return { bg: 'bg-gray-500', Icon: null };
+  }
+};
 
 export default function RepositoryOverview({ repoName, data: scanData }) {
   const [healthData, setHealthData] = useState(null);
@@ -99,7 +111,16 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
               <Star className="w-5 h-5 text-slate-400 hover:text-amber-400 cursor-pointer transition-colors" />
             </div>
             <div className="flex items-center gap-3 mt-2">
-              <Badge variant="neutral" icon={<div className="w-3 h-3 rounded-full bg-blue-500 mr-1" />}>Python</Badge>
+              {overview.language && (() => {
+                const config = getLanguageConfig(overview.language);
+                return (
+                  <Badge variant="neutral" icon={
+                    config.Icon ? <config.Icon className="w-3 h-3 mr-1" /> : <div className={`w-3 h-3 rounded-full ${config.bg} mr-1`} />
+                  }>
+                    {overview.language}
+                  </Badge>
+                );
+              })()}
               <Badge variant="neutral" icon={<GitBranch className="w-3 h-3 mr-1" />}>main</Badge>
             </div>
           </div>
@@ -155,9 +176,15 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
                 {repoName} has {filesCount} files analyzed successfully.
               </p>
               <div className="space-y-3 text-sm">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center">
                   <span className="text-slate-500 flex items-center"><Code className="w-4 h-4 mr-2" /> Language</span>
-                  <span className="font-medium text-slate-900">Python</span>
+                  <div className="flex items-center gap-1.5 font-medium text-slate-900">
+                    {(() => {
+                      const config = getLanguageConfig(overview.language || 'Python');
+                      return config.Icon ? <config.Icon className="w-4 h-4" /> : <div className={`w-2 h-2 rounded-full ${config.bg}`} />;
+                    })()}
+                    <span>{overview.language || "Unknown"}</span>
+                  </div>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500 flex items-center"><GitBranch className="w-4 h-4 mr-2" /> Default Branch</span>

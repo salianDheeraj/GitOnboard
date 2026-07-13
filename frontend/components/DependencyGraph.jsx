@@ -20,26 +20,48 @@ import { layoutGraph, applyLocalRelaxation } from '@/utils/layout';
 import { buildVFS, buildNodePathMap, calculateVisualComplexity, getAutoExpandedPaths } from '@/utils/vfs';
 import { buildVisibleGraph } from '@/utils/graphBuilder';
 
+import { PythonIcon, JavascriptIcon, TypescriptIcon, ReactIcon, JavaIcon } from './common/LanguageIcons';
+
+const getLanguageConfig = (lang) => {
+  switch (lang) {
+    case 'Python': return { color: '#6366f1', Icon: PythonIcon };
+    case 'JavaScript': return { color: '#eab308', Icon: JavascriptIcon };
+    case 'TypeScript': return { color: '#2563eb', Icon: TypescriptIcon };
+    case 'React': return { color: '#06b6d4', Icon: ReactIcon };
+    case 'Java': return { color: '#ef4444', Icon: JavaIcon };
+    default: return { color: '#9ca3af', Icon: null };
+  }
+};
+
 // Custom Node for Files
-const CustomNode = memo(({ data }) => (
-  <div style={{
-    background: '#ffffff',
-    border: '2px solid #6366f1',
-    borderRadius: '24px',
-    padding: '8px 16px',
-    fontSize: '12px',
-    fontWeight: '600',
-    color: '#374151',
-    fontFamily: 'sans-serif',
-    boxShadow: '0 2px 4px -1px rgb(0 0 0 / 0.1)',
-    minWidth: '50px',
-    textAlign: 'center',
-  }}>
-    <Handle type="target" position={Position.Top} style={{ visibility: 'hidden', top: '50%' }} />
-    <Handle type="source" position={Position.Bottom} style={{ visibility: 'hidden', top: '50%' }} />
-    {data.label}
-  </div>
-));
+const CustomNode = memo(({ data }) => {
+  const config = getLanguageConfig(data.language);
+  const Icon = config.Icon;
+  
+  return (
+    <div style={{
+      background: '#ffffff',
+      border: `2px solid ${config.color}`,
+      borderRadius: '24px',
+      padding: '8px 16px',
+      fontSize: '12px',
+      fontWeight: '600',
+      color: '#374151',
+      fontFamily: 'sans-serif',
+      boxShadow: '0 2px 4px -1px rgb(0 0 0 / 0.1)',
+      minWidth: '50px',
+      textAlign: 'center',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px'
+    }}>
+      <Handle type="target" position={Position.Top} style={{ visibility: 'hidden', top: '50%' }} />
+      <Handle type="source" position={Position.Bottom} style={{ visibility: 'hidden', top: '50%' }} />
+      {Icon && <Icon style={{ width: '14px', height: '14px' }} />}
+      {data.label}
+    </div>
+  );
+});
 
 // Custom Node for Folders
 const FolderNode = memo(({ data }) => (
@@ -419,7 +441,7 @@ export default function DependencyGraph({ repoName }) {
   }
 
   if (nodes.length === 0) {
-    return <div className="h-full flex items-center justify-center text-gray-400">No Python files found to analyze.</div>;
+    return <div className="h-full flex items-center justify-center text-gray-400">No supported source files found to analyze.</div>;
   }
 
   return (

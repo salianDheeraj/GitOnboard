@@ -147,11 +147,34 @@ def import_repo(req: ImportRequest):
                 logger.info(f"Removed ignored directory: {p}")
         
         # Save metadata
+        from collections import Counter
+        from backend.intelligence.parser import LanguageParser
+        
+        parser = LanguageParser()
+        
+        # Calculate primary language
+        exts = [p.suffix.lower() for p in target_dir.rglob("*") if p.is_file()]
+        supported_exts = [ext for ext in exts if parser.supports_extension(ext)]
+        
+        if supported_exts:
+            most_common = Counter(supported_exts).most_common(1)[0][0]
+            lang_map = {
+                ".py": "Python", 
+                ".js": "JavaScript", 
+                ".ts": "TypeScript", 
+                ".jsx": "React", 
+                ".tsx": "React", 
+                ".java": "Java"
+            }
+            primary_language = lang_map.get(most_common, "Unknown")
+        else:
+            primary_language = "Unknown"
+            
         metadata = load_metadata()
         metadata[repo_name] = {
             "project_name": repo_name,
             "repository_path": str(target_dir),
-            "language": "Python",
+            "language": primary_language,
             "import_time": datetime.now(timezone.utc).isoformat()
         }
         save_metadata(metadata)
@@ -246,6 +269,10 @@ def scan_repo(repo_name: str):
     query_layer = get_or_build_model(repo_name)
     metrics = query_layer.model.analyses.metrics
     
+    metadata = load_metadata()
+    repo_meta = metadata.get(repo_name, {})
+    repo_language = repo_meta.get("language", "Unknown")
+    
     hierarchy = {
         "name": repo_name,
         "type": "directory",
@@ -273,11 +300,27 @@ def scan_repo(repo_name: str):
             dirs_by_path[parent_dir]["children"].append(d_dict)
             
     files_metadata = []
+    
+    from backend.intelligence.parser import LanguageParser
+    parser = LanguageParser()
+    lang_map = {
+        ".py": "Python", 
+        ".js": "JavaScript", 
+        ".ts": "TypeScript", 
+        ".jsx": "React", 
+        ".tsx": "React", 
+        ".java": "Java"
+    }
+    
     for f in query_layer.get_files():
+        lang = lang_map.get(f.extension.lower(), "Unknown")
+        if not parser.supports_extension(f.extension.lower()):
+            lang = "Unknown"
+            
         files_metadata.append({
             "path": f.path,
             "extension": f.extension,
-            "language": "Python" if f.is_python else "Unknown",
+            "language": lang,
             "size": f.size,
             "modified_time": ""
         })
@@ -286,7 +329,8 @@ def scan_repo(repo_name: str):
         "overview": {
             "total_files": metrics.get("total_files", 0),
             "total_python_files": metrics.get("python_files", 0),
-            "total_directories": metrics.get("total_directories", 0)
+            "total_directories": metrics.get("total_directories", 0),
+            "language": repo_language
         },
         "hierarchy": hierarchy,
         "files": files_metadata
@@ -300,8 +344,8 @@ def parse_repo_file(repo_name: str, file_path: str):
     if not file_node:
         raise HTTPException(status_code=404, detail="File not found in model")
         
-    classes = query_layer.get_classes_in_file(file_path)
-    functions = [fn for fn in query_layer.model.entities.functions.values() if fn.file_id == file_path]
+    classes = query_layer.get_classes_in_file(file_node.id)
+    functions = [fn for fn in query_layer.model.entities.functions.values() if fn.file_id == file_node.id]
     
     result = {
         "imports": [],
@@ -316,9 +360,29 @@ def get_dependencies(repo_name: str):
     query_layer = get_or_build_model(repo_name)
     dep_graph = DependencyGraphView(query_layer.model)
     
-    # Return all python files as nodes, even if they have no edges
-    nodes = [{"id": f.path, "label": f.name, "full_path": f.path} for f in query_layer.get_files() if f.is_python]
+    from backend.intelligence.parser import LanguageParser
+    parser = LanguageParser()
+    lang_map = {
+        ".py": "Python", 
+        ".js": "JavaScript", 
+        ".ts": "TypeScript", 
+        ".jsx": "React", 
+        ".tsx": "React", 
+        ".java": "Java"
+    }
     
+    # Return all supported files as nodes
+    nodes = []
+    for f in query_layer.get_files():
+        ext = f.extension.lower()
+        if parser.supports_extension(ext):
+            nodes.append({
+                "id": f.path, 
+                "label": f.name, 
+                "full_path": f.path,
+                "language": lang_map.get(ext, "Unknown")
+            })
+            
     edges = [{"id": f"e-{s}-{t}", "source": s, "target": t} for s, targets in dep_graph.get_edges().items() for t in targets]
     
     return {"nodes": nodes, "edges": edges}

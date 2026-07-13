@@ -34,7 +34,7 @@ export default function CodeDetailsViewer({
         {!selectedFile ? (
           <div className="text-center text-gray-400 mt-20">
             <div className="text-4xl mb-2">🔍</div>
-            <p className="text-lg">Select a Python file from the explorer</p>
+            <p className="text-lg">Select a source file from the explorer</p>
           </div>
         ) : isParsing ? (
           <div className="text-center text-blue-500 font-medium mt-10 text-lg">Extracting structures...</div>
@@ -47,7 +47,9 @@ export default function CodeDetailsViewer({
             {selectedFunction ? (
               <div className="space-y-6">
                 <div className="bg-blue-50 border border-blue-100 rounded-md p-5">
-                  <div className="font-mono text-xl font-bold text-blue-800 break-all mb-4">def {selectedFunction.name}()</div>
+                  <div className="font-mono text-xl font-bold text-blue-800 break-all mb-4">
+                    <span className="text-blue-500 font-normal">Function: </span>{selectedFunction.name}
+                  </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <p className="text-sm font-bold text-gray-500 uppercase">Location</p>
