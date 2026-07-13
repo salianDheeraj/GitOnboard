@@ -1,0 +1,303 @@
+"use client";
+
+import React, { useState, useEffect } from 'react';
+import { Card, CardHeader } from '../common/Card';
+import { Badge } from '../common/Badge';
+import { Button } from '../common/Button';
+import Link from 'next/link';
+import { 
+  Star, 
+  GitBranch, 
+  ShieldCheck, 
+  FileText, 
+  Code, 
+  Box, 
+  RefreshCw, 
+  Download,
+  AlertTriangle,
+  Info,
+  ChevronRight,
+  Sparkles,
+  Network,
+  Share2,
+  Search
+} from 'lucide-react';
+
+export default function RepositoryOverview({ repoName, data: scanData }) {
+  const [healthData, setHealthData] = useState(null);
+  const [statsData, setStatsData] = useState(null);
+  const [findingsData, setFindingsData] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchRealData = async () => {
+      setIsLoading(true);
+      try {
+        const [healthRes, statsRes, findingsRes] = await Promise.all([
+          fetch(`/api/repos/${repoName}/health/scores`),
+          fetch(`/api/repos/${repoName}/stats`),
+          fetch(`/api/repos/${repoName}/health/findings`)
+        ]);
+
+        if (healthRes.ok) setHealthData(await healthRes.json());
+        if (statsRes.ok) setStatsData(await statsRes.json());
+        if (findingsRes.ok) setFindingsData(await findingsRes.json());
+      } catch (err) {
+        console.error("Failed to load overview data", err);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchRealData();
+  }, [repoName]);
+
+  const overview = scanData?.overview || {};
+  const healthScore = healthData?.health_score || 0;
+  const status = healthData?.status || "Analyzing";
+  
+  const filesCount = overview.total_files || statsData?.total_files || 0;
+  const funcsCount = statsData?.total_functions || 0;
+  const classesCount = statsData?.total_classes || 0;
+  
+  const loc = statsData?.lines_of_code || 0;
+  // Fallbacks if not computed yet
+  const complexity = statsData?.average_functions_per_module ? statsData.average_functions_per_module.toFixed(1) : "0";
+  const testCov = statsData?.custom_metrics?.test_coverage_approx_percent || "0%";
+  const commentRatio = statsData?.custom_metrics?.documentation_coverage_percent ? `${statsData.custom_metrics.documentation_coverage_percent.toFixed(1)}%` : "0%";
+  
+  const findings = findingsData?.findings || [];
+  const topFindings = findings.slice(0, 3);
+
+  const getStatusColor = (statusText) => {
+    switch (statusText) {
+      case 'Excellent': return 'text-green-600';
+      case 'Good': return 'text-blue-600';
+      case 'Fair': return 'text-amber-600';
+      case 'Needs Work': return 'text-red-600';
+      default: return 'text-slate-600';
+    }
+  };
+
+  const getSeverityIcon = (severity) => {
+    if (severity === "CRITICAL" || severity === "ERROR") return <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />;
+    if (severity === "WARNING") return <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />;
+    return <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />;
+  };
+
+  return (
+    <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">
+      
+      {/* Top Header Stats */}
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+        <div className="flex items-center gap-4">
+          <div className="w-16 h-16 bg-slate-900 rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm">
+            <span className="text-white font-bold text-xl">{repoName.charAt(0).toUpperCase()}</span>
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{repoName}</h1>
+              <Star className="w-5 h-5 text-slate-400 hover:text-amber-400 cursor-pointer transition-colors" />
+            </div>
+            <div className="flex items-center gap-3 mt-2">
+              <Badge variant="neutral" icon={<div className="w-3 h-3 rounded-full bg-blue-500 mr-1" />}>Python</Badge>
+              <Badge variant="neutral" icon={<GitBranch className="w-3 h-3 mr-1" />}>main</Badge>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-4 bg-white border border-slate-200 rounded-xl p-2 shadow-sm">
+            <div className="px-4 py-1 flex flex-col items-center border-r border-slate-100">
+              <div className={`flex items-center mb-1 ${getStatusColor(status)}`}>
+                <ShieldCheck className="w-4 h-4 mr-1" />
+                <span className="text-xs font-semibold uppercase tracking-wider">Health Score</span>
+              </div>
+              <span className="text-2xl font-bold text-slate-900 leading-none">{healthScore}</span>
+            </div>
+            <div className="px-4 py-1 flex flex-col items-center border-r border-slate-100">
+              <div className="flex items-center text-blue-600 mb-1">
+                <FileText className="w-4 h-4 mr-1" />
+                <span className="text-lg font-bold text-slate-900 leading-none">{filesCount}</span>
+              </div>
+              <span className="text-xs text-slate-500">Files</span>
+            </div>
+            <div className="px-4 py-1 flex flex-col items-center border-r border-slate-100">
+              <div className="flex items-center text-blue-600 mb-1">
+                <Code className="w-4 h-4 mr-1" />
+                <span className="text-lg font-bold text-slate-900 leading-none">{funcsCount}</span>
+              </div>
+              <span className="text-xs text-slate-500">Functions</span>
+            </div>
+            <div className="px-4 py-1 flex flex-col items-center">
+              <div className="flex items-center text-blue-600 mb-1">
+                <Box className="w-4 h-4 mr-1" />
+                <span className="text-lg font-bold text-slate-900 leading-none">{classesCount}</span>
+              </div>
+              <span className="text-xs text-slate-500">Classes</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" icon={<RefreshCw className="w-4 h-4" />}>Refresh</Button>
+            <Button variant="primary" icon={<Download className="w-4 h-4" />}>Export</Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        {/* Overview Card */}
+        <Card className="lg:col-span-1 flex flex-col" noPadding>
+          <CardHeader title="Repository Overview" />
+          <div className="p-6 flex-1 flex flex-col justify-between">
+            <div>
+              <p className="text-sm text-slate-600 leading-relaxed mb-6">
+                {repoName} has {filesCount} files analyzed successfully.
+              </p>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-500 flex items-center"><Code className="w-4 h-4 mr-2" /> Language</span>
+                  <span className="font-medium text-slate-900">Python</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 flex items-center"><GitBranch className="w-4 h-4 mr-2" /> Default Branch</span>
+                  <span className="font-medium text-slate-900">main</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        {/* Health Score Ring */}
+        <Card className="lg:col-span-1 flex flex-col items-center justify-center text-center">
+          <h3 className="font-semibold text-slate-800 w-full text-left mb-6">Health Score</h3>
+          <div className="relative w-40 h-40 flex items-center justify-center">
+            <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36">
+              <path
+                className="text-slate-100"
+                strokeWidth="3"
+                stroke="currentColor"
+                fill="none"
+                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+              />
+              <path
+                className="text-blue-600"
+                strokeWidth="3"
+                strokeDasharray={`${healthScore}, 100`}
+                strokeLinecap="round"
+                stroke="currentColor"
+                fill="none"
+                d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+              />
+            </svg>
+            <div className="absolute flex flex-col items-center justify-center">
+              <span className="text-4xl font-bold text-slate-900">{healthScore}</span>
+              <span className="text-sm text-slate-500">/100</span>
+              <span className={`text-xs font-medium mt-1 ${getStatusColor(status)}`}>{status}</span>
+            </div>
+          </div>
+        </Card>
+
+        {/* Key Metrics Grid */}
+        <Card className="lg:col-span-1 flex flex-col bg-transparent shadow-none border-none" noPadding>
+          <h3 className="font-semibold text-slate-800 mb-4 px-1">Key Metrics</h3>
+          <div className="grid grid-cols-2 gap-4 flex-1">
+            <Card className="flex flex-col justify-center p-4 shadow-sm border border-slate-200">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Lines of Code</span>
+              <span className="text-2xl font-bold text-slate-900">{loc}</span>
+            </Card>
+            <Card className="flex flex-col justify-center p-4 shadow-sm border border-slate-200">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Comment Ratio</span>
+              <span className="text-2xl font-bold text-slate-900">{commentRatio}</span>
+            </Card>
+            <Card className="flex flex-col justify-center p-4 shadow-sm border border-slate-200">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Complexity</span>
+              <span className="text-2xl font-bold text-slate-900">{complexity}</span>
+            </Card>
+            <Card className="flex flex-col justify-center p-4 shadow-sm border border-slate-200">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Test Coverage</span>
+              <span className="text-2xl font-bold text-slate-900">{testCov}</span>
+            </Card>
+          </div>
+        </Card>
+
+      </div>
+      
+      {/* Bottom Section (AI Summary, Findings, Actions) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        {/* AI Summary */}
+        <Card className="lg:col-span-1">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-semibold text-slate-800 flex items-center"><Sparkles className="w-4 h-4 mr-2 text-blue-500" /> AI Summary</h3>
+            <Link href={`/repository/${repoName}/summary`} className="text-xs text-blue-600 hover:underline cursor-pointer">View full report &rarr;</Link>
+          </div>
+          <div className="bg-blue-50/50 p-4 rounded-lg text-sm text-slate-700 mb-4 border border-blue-100">
+            This repository has a calculated health score of {healthScore}.
+          </div>
+          <div className="space-y-3">
+            <div>
+              <span className="text-xs font-semibold text-slate-500 uppercase block mb-2">Metrics Status</span>
+              <div className="flex gap-2">
+                <Badge variant={healthScore > 60 ? "success" : "warning"}>{status}</Badge>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        {/* Recent Findings */}
+        <Card className="lg:col-span-1">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-semibold text-slate-800">Recent Findings</h3>
+            <Link href={`/repository/${repoName}/health`} className="text-xs text-blue-600 hover:underline cursor-pointer">View all &rarr;</Link>
+          </div>
+          <div className="space-y-4">
+            {isLoading ? (
+              <p className="text-sm text-slate-500">Loading findings...</p>
+            ) : topFindings.length > 0 ? (
+              topFindings.map((finding, i) => (
+                <div key={i} className="flex items-start gap-3">
+                  {getSeverityIcon(finding.severity)}
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">{finding.title || finding.description}</p>
+                    {finding.file_path && <p className="text-xs text-slate-500 mt-0.5">{finding.file_path}</p>}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-slate-500">No major issues found.</p>
+            )}
+          </div>
+        </Card>
+
+        {/* Quick Actions */}
+        <Card className="lg:col-span-1">
+          <h3 className="font-semibold text-slate-800 mb-4">Quick Actions</h3>
+          <div className="space-y-2">
+            <Link href={`/repository/${repoName}/architecture`} className="flex items-center justify-between p-3 hover:bg-slate-50 rounded-lg cursor-pointer transition-colors border border-transparent hover:border-slate-200">
+              <div className="flex items-center gap-3">
+                <Network className="w-4 h-4 text-blue-600" />
+                <div>
+                  <p className="text-sm font-medium text-slate-900">Explore Architecture</p>
+                  <p className="text-xs text-slate-500">Visualize system architecture</p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-slate-400" />
+            </Link>
+            <Link href={`/repository/${repoName}/graph`} className="flex items-center justify-between p-3 hover:bg-slate-50 rounded-lg cursor-pointer transition-colors border border-transparent hover:border-slate-200">
+              <div className="flex items-center gap-3">
+                <Share2 className="w-4 h-4 text-blue-600" />
+                <div>
+                  <p className="text-sm font-medium text-slate-900">View Dependency Graph</p>
+                  <p className="text-xs text-slate-500">Analyze dependencies</p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-slate-400" />
+            </Link>
+          </div>
+        </Card>
+
+      </div>
+    </div>
+  );
+}
