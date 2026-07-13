@@ -16,11 +16,13 @@ import {
   BarChart3, 
   Microscope,
   ChevronLeft,
-  CheckCircle2
+  CheckCircle2,
+  GitMerge
 } from 'lucide-react';
 
 const navItems = [
   { id: 'overview', label: 'Dashboard', icon: LayoutDashboard, path: '' },
+  { id: 'trace', label: 'Feature Tracing', icon: GitMerge, path: '/trace' },
   { id: 'explorer', label: 'File Explorer', icon: FolderTree, path: '/explorer' },
   { id: 'graph', label: 'Dependency Graph', icon: Share2, path: '/graph' },
   { id: 'architecture', label: 'Architecture', icon: Network, path: '/architecture' },

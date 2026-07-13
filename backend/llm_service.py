@@ -39,6 +39,34 @@ class LLMService:
             logger.error(f"Failed to communicate with Ollama:\n{traceback.format_exc()}")
             raise Exception(f"LLM generation failed: {e}")
 
+    def generate_explanation(self, prompt: str) -> str:
+        """
+        Sends a generic prompt to the local Ollama model to generate an explanation.
+        """
+        url = f"{self.base_url}/api/generate"
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.3
+            }
+        }
+        
+        try:
+            response = requests.post(url, json=payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("response", "Error: No explanation generated.")
+        except requests.exceptions.HTTPError as e:
+            error_text = e.response.text if e.response is not None else "No response body"
+            logger.error(f"Ollama HTTP error: {e}, Body: {error_text}")
+            raise Exception(f"LLM explanation HTTP error: {error_text}")
+        except Exception as e:
+            import traceback
+            logger.error(f"Failed to communicate with Ollama:\n{traceback.format_exc()}")
+            raise Exception(f"LLM explanation failed: {e}")
+
     def _build_prompt(self, metadata: dict) -> str:
         metadata_json = json.dumps(metadata, indent=2)
         

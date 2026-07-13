@@ -799,3 +799,87 @@ def get_health_smells(repo_name: str):
             })
             
     return {"smells": smells}
+
+# --- Phase 3: Feature Tracing ---
+@app.get("/api/repos/{repo_name}/trace")
+def trace_feature(repo_name: str, q: str):
+    if not q or len(q.strip()) == 0:
+        return {"trace": None}
+        
+    # Stage 1: Semantic search
+    repos_dir = BASE_DIR / "data/repos"
+    target_dir = repos_dir / repo_name
+    chroma_dir = target_dir / "chroma"
+    
+    if not target_dir.exists() or not target_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+        
+    try:
+        client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
+        collection = client.get_collection(name="semantic_index")
+        query_results = collection.query(query_texts=[q], n_results=5)
+        seed_nodes = []
+        if query_results and query_results.get("metadatas") and len(query_results["metadatas"]) > 0:
+            # We need query_layer to resolve actual entity IDs
+            try:
+                query_layer = get_or_build_model(repo_name)
+            except Exception as e:
+                logger.error(f"Failed to build model for trace: {e}")
+                return {"trace": None}
+                
+            for item in query_results["metadatas"][0]:
+                fp = item.get("file_path")
+                name = item.get("name")
+                typ = item.get("type")
+                ent_id = None
+                
+                if typ == "function":
+                    for f in query_layer.model.entities.functions.values():
+                        if getattr(f, "file_id", "") == fp and getattr(f, "name", "") == name:
+                            ent_id = getattr(f, "id", None)
+                            break
+                elif typ == "class":
+                    for c in query_layer.model.entities.classes.values():
+                        if getattr(c, "file_id", "") == fp and getattr(c, "name", "") == name:
+                            ent_id = getattr(c, "id", None)
+                            break
+                            
+                if ent_id:
+                    item["id"] = ent_id
+                    seed_nodes.append(item)
+    except Exception as e:
+        logger.error(f"Semantic search failed for trace: {e}")
+        seed_nodes = []
+        
+    if not seed_nodes:
+        return {"trace": None}
+        
+    # Get repository model
+    # In main.py there is get_or_build_model
+    # Let's see how get_or_build_model is defined in main.py... oh it's query_layer = get_or_build_model(repo_name)
+    try:
+        query_layer = get_or_build_model(repo_name)
+    except Exception as e:
+        logger.error(f"Failed to build model for trace: {e}")
+        return {"trace": None}
+    
+    from backend.intelligence.feature_tracing import DeterministicTracer
+    tracer = DeterministicTracer(query_layer.model)
+    trace_result = tracer.trace_feature(seed_nodes)
+    
+    return {"trace": trace_result}
+
+class ExplainTraceRequest(BaseModel):
+    feature_query: str
+    trace_data: dict
+
+@app.post("/api/repos/{repo_name}/trace/explain")
+def explain_trace(repo_name: str, req: ExplainTraceRequest):
+    prompt = f"Explain the following implementation trace for the feature '{req.feature_query}'. The trace was deterministically generated from the repository's semantic, dependency, and call graphs. Do not add any new nodes or hallucinate execution paths. Explain what each component does in the context of the flow.\n\nTrace Data: {json.dumps(req.trace_data, indent=2)}"
+    
+    try:
+        explanation = llm_service.generate_explanation(prompt)
+        return {"explanation": explanation}
+    except Exception as e:
+        logger.error(f"Explanation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate explanation")
