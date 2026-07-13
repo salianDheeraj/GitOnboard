@@ -8,6 +8,13 @@ export function Card({ children, className = '', noPadding = false }) {
   );
 }
 
+/**
+ * @param {Object} props
+ * @param {string} props.title
+ * @param {string|React.ReactNode} [props.subtitle]
+ * @param {React.ReactNode} [props.action]
+ * @param {string} [props.className]
+ */
 export function CardHeader({ title, subtitle, action, className = '' }) {
   return (
     <div className={`flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50/50 ${className}`}>

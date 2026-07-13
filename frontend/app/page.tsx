@@ -11,7 +11,7 @@ import { Badge } from '@/components/common/Badge';
 import { Plus, Trash2, FolderGit2 } from 'lucide-react';
 
 export default function Dashboard() {
-  const [repos, setRepos] = useState([]);
+  const [repos, setRepos] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [importUrl, setImportUrl] = useState('');
@@ -34,7 +34,7 @@ export default function Dashboard() {
     fetchRepos();
   }, []);
 
-  const handleDelete = async (e, repoName) => {
+  const handleDelete = async (e: React.MouseEvent, repoName: string) => {
     e.preventDefault();
     if (!window.confirm(`Are you sure you want to delete ${repoName}?`)) return;
     
@@ -47,7 +47,7 @@ export default function Dashboard() {
     }
   };
 
-  const handleImport = async (e) => {
+  const handleImport = async (e: React.FormEvent) => {
     e.preventDefault();
     setImportError('');
     
@@ -63,7 +63,7 @@ export default function Dashboard() {
       setImportUrl('');
       fetchRepos();
     } catch (err) {
-      setImportError(err.message || 'Failed to import repository.');
+      setImportError((err as any).message || 'Failed to import repository.');
     } finally {
       setIsImporting(false);
     }

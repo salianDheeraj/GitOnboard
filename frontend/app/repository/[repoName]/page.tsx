@@ -21,7 +21,7 @@ export default function RepositoryOverviewPage() {
         const json = await repositoryService.scan(repoName);
         setData(json);
       } catch (err) {
-        setError(err.message);
+        setError((err as any).message);
       } finally {
         setIsLoading(false);
       }

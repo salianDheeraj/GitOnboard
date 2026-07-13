@@ -15,6 +15,18 @@ const variantClasses = {
   soft: 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-transparent'
 };
 
+/**
+ * @param {Object} props
+ * @param {React.ReactNode} [props.children]
+ * @param {string} [props.variant]
+ * @param {string} [props.size]
+ * @param {string} [props.className]
+ * @param {React.ReactNode} [props.icon]
+ * @param {React.ReactNode} [props.iconRight]
+ * @param {boolean} [props.disabled]
+ * @param {function} [props.onClick]
+ * @param {string} [props.type]
+ */
 export function Button({ 
   children, 
   variant = 'primary', 

@@ -1,7 +1,7 @@
 import React from 'react';
 import { Sidebar } from '@/components/layout/Sidebar';
 
-export default async function RepositoryLayout(props) {
+export default async function RepositoryLayout(props: any) {
   const params = await props.params;
   const repoName = params.repoName;
 

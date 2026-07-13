@@ -9,6 +9,13 @@ const variantClasses = {
   outline: 'bg-transparent text-slate-600 border-slate-300'
 };
 
+/**
+ * @param {Object} props
+ * @param {React.ReactNode} [props.children]
+ * @param {string} [props.variant]
+ * @param {string} [props.className]
+ * @param {React.ReactNode} [props.icon]
+ */
 export function Badge({ children, variant = 'neutral', className = '', icon }) {
   return (
     <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border ${variantClasses[variant]} ${className}`}>
