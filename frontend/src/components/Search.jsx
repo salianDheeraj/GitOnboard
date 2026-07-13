@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
+import { useTaskStatus } from '../hooks/useTaskStatus';
 
 export default function Search({ repoName }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
-  const [isIndexing, setIsIndexing] = useState(true);
+  const taskStatus = useTaskStatus(repoName, 'index');
+  const isIndexing = taskStatus === 'processing' || taskStatus === null;
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState(null);
@@ -13,7 +15,6 @@ export default function Search({ repoName }) {
     let isMounted = true;
     
     const buildIndex = async () => {
-      setIsIndexing(true);
       setError(null);
       try {
         const res = await fetch(`/api/repos/${repoName}/index`, {
@@ -22,11 +23,9 @@ export default function Search({ repoName }) {
         if (!res.ok) {
           throw new Error("Failed to build metadata index");
         }
-        // Index is ready
+        // Background indexing task started
       } catch (err) {
         if (isMounted) setError(err.message);
-      } finally {
-        if (isMounted) setIsIndexing(false);
       }
     };
     

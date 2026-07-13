@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTaskStatus } from '../hooks/useTaskStatus';
 
 export default function SemanticSearch({ repoName }) {
   const [query, setQuery] = useState("");
@@ -6,6 +7,18 @@ export default function SemanticSearch({ repoName }) {
   
   // Status states: 'checking', 'building', 'updating', 'ready'
   const [indexState, setIndexState] = useState('checking');
+  const taskStatus = useTaskStatus(repoName, 'semantic_index');
+  
+  useEffect(() => {
+    if (taskStatus === 'processing') {
+      setIndexState('building');
+      setIndexMessage('Building the semantic index... This may take a moment.');
+    } else if (taskStatus === 'completed' && indexState === 'building') {
+      setIndexState('ready');
+      setIndexMessage('Semantic index up to date.');
+      setTimeout(() => setIndexMessage(''), 4000);
+    }
+  }, [taskStatus]);
   const [indexMessage, setIndexMessage] = useState("");
   
   const [isSearching, setIsSearching] = useState(false);
@@ -44,24 +57,9 @@ export default function SemanticSearch({ repoName }) {
           throw new Error("Failed to build semantic index");
         }
         
-        const data = await res.json();
+        // Background task started or was already running.
+        // We let the useTaskStatus hook handle the UI updates.
         
-        if (isMounted) {
-          if (data.status === "up to date") {
-            setIndexMessage("Repository already indexed. Semantic index up to date.");
-          } else if (data.status === "indexed") {
-            setIndexMessage(`Building semantic index complete. Processed ${data.processed} files.`);
-          } else if (data.status === "updated") {
-            setIndexMessage(`Updating changed files complete. Processed ${data.processed} files, removed ${data.deleted} deleted files.`);
-          }
-          
-          setIndexState('ready');
-          
-          // Clear the success message after 4 seconds
-          setTimeout(() => {
-            if (isMounted) setIndexMessage("");
-          }, 4000);
-        }
       } catch (err) {
         if (isMounted) {
           setError(err.message);

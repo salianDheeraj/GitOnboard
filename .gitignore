@@ -21,6 +21,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+next_frontend/
+.gitignore
 
 # Environment
 .env

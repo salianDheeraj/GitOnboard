@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
+import { useTaskStatus } from '../hooks/useTaskStatus';
 import ReactMarkdown from 'react-markdown';
 
 export default function RepositorySummary({ repoName }) {
   const [summary, setSummary] = useState(null);
-  const [isGenerating, setIsGenerating] = useState(false);
+  const taskStatus = useTaskStatus(repoName, 'summary');
+  const isGenerating = taskStatus === 'processing';
   const [isOutdated, setIsOutdated] = useState(false);
   const [error, setError] = useState(null);
 
@@ -23,8 +25,14 @@ export default function RepositorySummary({ repoName }) {
     fetchSummary();
   }, [repoName]);
 
+
+  useEffect(() => {
+    if (taskStatus === 'completed') {
+      fetchSummary();
+    }
+  }, [taskStatus]);
+
   const generateSummary = async () => {
-    setIsGenerating(true);
     setError(null);
     try {
       const res = await fetch(`/api/repos/${repoName}/summary/generate`, {
@@ -36,8 +44,6 @@ export default function RepositorySummary({ repoName }) {
       setIsOutdated(false);
     } catch (err) {
       setError(err.message);
-    } finally {
-      setIsGenerating(false);
     }
   };
 

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from fastapi import BackgroundTasks
 import subprocess
 import os
 import shutil
@@ -36,7 +37,8 @@ app.add_middleware(
 class ImportRequest(BaseModel):
     url: str
 
-METADATA_FILE = Path("data/repos_metadata.json")
+BASE_DIR = Path(__file__).parent.parent.absolute()
+METADATA_FILE = BASE_DIR / "data/repos_metadata.json"
 
 def load_metadata():
     if METADATA_FILE.exists():
@@ -47,6 +49,49 @@ def load_metadata():
 def save_metadata(data):
     with open(METADATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def get_task_status(repo_name: str, task_name: str):
+    task_file = BASE_DIR / "data" / "repos" / repo_name / ".tasks.json"
+    if not task_file.exists():
+        return None
+    try:
+        import json
+        with open(task_file, "r") as f:
+            tasks = json.load(f)
+        return tasks.get(task_name)
+    except:
+        return None
+
+def set_task_status(repo_name: str, task_name: str, status: str):
+    task_file = BASE_DIR / "data" / "repos" / repo_name / ".tasks.json"
+    try:
+        import json
+        tasks = {}
+        if task_file.exists():
+            with open(task_file, "r") as f:
+                tasks = json.load(f)
+        if status is None:
+            tasks.pop(task_name, None)
+        else:
+            tasks[task_name] = status
+        with open(task_file, "w") as f:
+            json.dump(tasks, f)
+    except Exception as e:
+        logger.error(f"Failed to set task status: {e}")
+
+@app.get("/api/repos/{repo_name}/tasks")
+def get_tasks(repo_name: str):
+    task_file = BASE_DIR / "data" / "repos" / repo_name / ".tasks.json"
+    tasks = {}
+    if task_file.exists():
+        try:
+            import json
+            with open(task_file, "r") as f:
+                tasks = json.load(f)
+        except:
+            pass
+    return tasks
 
 @app.get("/")
 def read_root():
@@ -64,7 +109,7 @@ def import_repo(req: ImportRequest):
         repo_name = repo_name[:-4]
 
     # Store in data/repos
-    repos_dir = Path("data/repos")
+    repos_dir = BASE_DIR / "data/repos"
     repos_dir.mkdir(parents=True, exist_ok=True)
     
     target_dir = repos_dir / repo_name
@@ -125,7 +170,7 @@ def list_repos():
 
 @app.delete("/api/repos/{repo_name}")
 def delete_repo(repo_name: str):
-    repos_dir = Path("data/repos")
+    repos_dir = BASE_DIR / "data/repos"
     target_dir = repos_dir / repo_name
     
     if not target_dir.exists() or not target_dir.is_dir():
@@ -160,7 +205,7 @@ from analysis.runner import AnalysisRunner
 _model_cache = {}
 
 def get_or_build_model(repo_name: str) -> QueryLayer:
-    repos_dir = Path("data/repos")
+    repos_dir = BASE_DIR / "data/repos"
     target_dir = repos_dir / repo_name
     
     if not target_dir.exists() or not target_dir.is_dir():
@@ -323,9 +368,23 @@ def get_architecture(repo_name: str, node_id: str = "root"):
     return {"nodes": nodes}
 
 @app.post("/api/repos/{repo_name}/index")
-def index_repo(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
-    return {"message": "Indexing complete", "indexed_files_count": len(query_layer.get_files())}
+def index_repo(repo_name: str, background_tasks: BackgroundTasks):
+    current_status = get_task_status(repo_name, "index")
+    if current_status == "processing":
+        return {"status": "processing"}
+        
+    set_task_status(repo_name, "index", "processing")
+    
+    def background_index():
+        try:
+            query_layer = get_or_build_model(repo_name)
+            set_task_status(repo_name, "index", "completed")
+        except Exception as e:
+            logger.error(f"Index failed: {e}")
+            set_task_status(repo_name, "index", "failed")
+            
+    background_tasks.add_task(background_index)
+    return {"status": "processing"}
 
 @app.get("/api/repos/{repo_name}/search")
 def search_repo(repo_name: str, q: str):
@@ -342,9 +401,23 @@ def search_repo(repo_name: str, q: str):
     return {"results": formatted}
 
 @app.post("/api/repos/{repo_name}/symbols/index")
-def index_symbols(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
-    return {"message": "Symbol database created successfully", "total_symbols": len(query_layer.model.entities.classes) + len(query_layer.model.entities.functions) + len(query_layer.model.entities.methods)}
+def index_symbols(repo_name: str, background_tasks: BackgroundTasks):
+    current_status = get_task_status(repo_name, "symbols_index")
+    if current_status == "processing":
+        return {"status": "processing"}
+        
+    set_task_status(repo_name, "symbols_index", "processing")
+    
+    def background_symbols_index():
+        try:
+            query_layer = get_or_build_model(repo_name)
+            set_task_status(repo_name, "symbols_index", "completed")
+        except Exception as e:
+            logger.error(f"Symbols index failed: {e}")
+            set_task_status(repo_name, "symbols_index", "failed")
+            
+    background_tasks.add_task(background_symbols_index)
+    return {"status": "processing"}
 
 @app.get("/api/repos/{repo_name}/symbols")
 def get_symbols(repo_name: str):
@@ -380,7 +453,7 @@ def get_stats(repo_name: str):
 
 @app.get("/api/repos/{repo_name}/summary")
 def get_summary(repo_name: str):
-    repos_dir = Path("data/repos")
+    repos_dir = BASE_DIR / "data/repos"
     target_dir = repos_dir / repo_name
     
     if not target_dir.exists() or not target_dir.is_dir():
@@ -409,41 +482,42 @@ def get_summary(repo_name: str):
         raise HTTPException(status_code=500, detail="Failed to read summary")
 
 @app.post("/api/repos/{repo_name}/summary/generate")
-def generate_summary(repo_name: str):
-    repos_dir = Path("data/repos")
-    target_dir = repos_dir / repo_name
+def generate_summary(repo_name: str, background_tasks: BackgroundTasks):
+    current_status = get_task_status(repo_name, "summary")
+    if current_status == "processing":
+        return {"status": "processing"}
     
-    if not target_dir.exists() or not target_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Repository not found")
-        
-    try:
-        # Rebuild metadata from core
-        query_layer = get_or_build_model(repo_name)
-        metrics = query_layer.model.analyses.metrics
-        
-        metadata = {
-            "name": repo_name,
-            "total_files": metrics.get("total_files", 0),
-            "python_files": metrics.get("python_files", 0),
-            "total_directories": metrics.get("total_directories", 0),
-            "top_modules": []
-        }
-        
-        summary_md = llm_service.generate_summary(metadata)
-        
-        summary_file = target_dir / "summary.md"
-        with open(summary_file, "w", encoding="utf-8") as f:
-            f.write(summary_md)
+    set_task_status(repo_name, "summary", "processing")
+    
+    def background_generate_summary():
+        try:
+            repos_dir = BASE_DIR / "data/repos"
+            target_dir = repos_dir / repo_name
+            query_layer = get_or_build_model(repo_name)
+            metrics = query_layer.model.analyses.metrics
+            metadata = {
+                "name": repo_name,
+                "total_files": metrics.get("total_files", 0),
+                "python_files": metrics.get("python_files", 0),
+                "total_directories": metrics.get("total_directories", 0),
+                "top_modules": []
+            }
+            summary_md = llm_service.generate_summary(metadata)
+            summary_file = target_dir / "summary.md"
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write(summary_md)
+            set_task_status(repo_name, "summary", "completed")
+        except Exception as e:
+            import traceback
+            logger.error(f"Summary generation failed: \\n{traceback.format_exc()}")
+            set_task_status(repo_name, "summary", "failed")
             
-        return {"summary": summary_md, "status": "generated"}
-    except Exception as e:
-        import traceback
-        logger.error(f"Summary generation failed:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
+    background_tasks.add_task(background_generate_summary)
+    return {"status": "processing"}
 
 @app.get("/api/repos/{repo_name}/semantic-status")
 def semantic_status_repo(repo_name: str):
-    repos_dir = Path("data/repos")
+    repos_dir = BASE_DIR / "data/repos"
     target_dir = repos_dir / repo_name
     if not target_dir.exists() or not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -452,124 +526,118 @@ def semantic_status_repo(repo_name: str):
     return {"has_index": state_file.exists()}
 
 @app.post("/api/repos/{repo_name}/semantic-index")
-def semantic_index_repo(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
-    target_dir = Path("data/repos") / repo_name
+def semantic_index_repo(repo_name: str, background_tasks: BackgroundTasks):
+    current_status = get_task_status(repo_name, "semantic_index")
+    if current_status == "processing":
+        return {"status": "processing"}
+        
+    set_task_status(repo_name, "semantic_index", "processing")
     
-    chroma_dir = target_dir / "chroma"
-    chroma_dir.mkdir(parents=True, exist_ok=True)
-    
-    state_file = target_dir / "semantic_index_state.json"
-    state = {}
-    if state_file.exists():
+    def background_semantic_index():
         try:
-            with open(state_file, "r") as f:
-                state = json.load(f)
-        except Exception:
+            query_layer = get_or_build_model(repo_name)
+            target_dir = BASE_DIR / "data/repos" / repo_name
+            chroma_dir = target_dir / "chroma"
+            chroma_dir.mkdir(parents=True, exist_ok=True)
+            state_file = target_dir / "semantic_index_state.json"
             state = {}
-            
-    client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
-    collection = client.get_or_create_collection(name="semantic_index")
-    
-    current_files = {}
-    for f in query_layer.get_files():
-        if f.is_python:
+            if state_file.exists():
+                try:
+                    import json
+                    with open(state_file, "r") as f:
+                        state = json.load(f)
+                except Exception:
+                    state = {}
+            client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
+            collection = client.get_or_create_collection(name="semantic_index")
+            current_files = {}
+            for f in query_layer.get_files():
+                if f.is_python:
+                    try:
+                        mtime = (target_dir / f.path).stat().st_mtime
+                        current_files[f.path] = mtime
+                    except Exception:
+                        pass
+            deleted_files = set(state.keys()) - set(current_files.keys())
+            modified_files = set()
+            new_files = set(current_files.keys()) - set(state.keys())
+            for f in current_files:
+                if f in state and current_files[f] > state[f]:
+                    modified_files.add(f)
+            files_to_process = new_files | modified_files
+            files_to_delete_chunks = deleted_files | modified_files
+            status = "up to date"
+            if not state:
+                status = "indexed"
+            elif files_to_process or files_to_delete_chunks:
+                status = "updated"
+            if not files_to_process and not files_to_delete_chunks:
+                set_task_status(repo_name, "semantic_index", "completed")
+                return
+            if files_to_delete_chunks:
+                for f in files_to_delete_chunks:
+                    try:
+                        collection.delete(where={"file_path": f})
+                    except Exception:
+                        pass
+            documents = []
+            metadatas = []
+            ids = []
+            import uuid
+            import ast
+            for rel_str in files_to_process:
+                pf = target_dir / rel_str
+                try:
+                    with open(pf, "r", encoding="utf-8") as f:
+                        source = f.read()
+                    tree = ast.parse(source)
+                    for node in tree.body:
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            segment = ast.get_source_segment(source, node)
+                            if not segment: continue
+                            element_type = "class" if isinstance(node, ast.ClassDef) else "function"
+                            documents.append(segment)
+                            metadatas.append({
+                                "file_path": rel_str,
+                                "type": element_type,
+                                "name": node.name
+                            })
+                            ids.append(str(uuid.uuid4()))
+                except Exception:
+                    pass
+            if documents:
+                batch_size = 2000
+                for i in range(0, len(documents), batch_size):
+                    collection.upsert(
+                        documents=documents[i:i+batch_size],
+                        metadatas=metadatas[i:i+batch_size],
+                        ids=ids[i:i+batch_size]
+                    )
+            for f in deleted_files:
+                if f in state:
+                    del state[f]
+            for f in files_to_process:
+                state[f] = current_files[f]
             try:
-                mtime = (target_dir / f.path).stat().st_mtime
-                current_files[f.path] = mtime
+                import json
+                with open(state_file, "w") as f:
+                    json.dump(state, f, indent=2)
             except Exception:
                 pass
-                
-    deleted_files = set(state.keys()) - set(current_files.keys())
-    modified_files = set()
-    new_files = set(current_files.keys()) - set(state.keys())
-    
-    for f in current_files:
-        if f in state and current_files[f] > state[f]:
-            modified_files.add(f)
-            
-    files_to_process = new_files | modified_files
-    files_to_delete_chunks = deleted_files | modified_files
-    
-    status = "up to date"
-    if not state:
-        status = "indexed"
-    elif files_to_process or files_to_delete_chunks:
-        status = "updated"
-        
-    if not files_to_process and not files_to_delete_chunks:
-        return {"message": "Semantic index up to date", "status": status, "processed": 0, "deleted": 0}
-        
-    if files_to_delete_chunks:
-        for f in files_to_delete_chunks:
-            try:
-                collection.delete(where={"file_path": f})
-            except Exception as e:
-                pass
-                
-    documents = []
-    metadatas = []
-    ids = []
-    
-    import uuid
-    import ast
-    
-    for rel_str in files_to_process:
-        pf = target_dir / rel_str
-        try:
-            with open(pf, "r", encoding="utf-8") as f:
-                source = f.read()
-            tree = ast.parse(source)
-            for node in tree.body:
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    segment = ast.get_source_segment(source, node)
-                    if not segment: continue
-                    element_type = "class" if isinstance(node, ast.ClassDef) else "function"
-                    documents.append(segment)
-                    metadatas.append({
-                        "file_path": rel_str,
-                        "type": element_type,
-                        "name": node.name
-                    })
-                    ids.append(str(uuid.uuid4()))
-        except Exception:
-            pass
-            
-    if documents:
-        batch_size = 2000
-        for i in range(0, len(documents), batch_size):
-            collection.upsert(
-                documents=documents[i:i+batch_size],
-                metadatas=metadatas[i:i+batch_size],
-                ids=ids[i:i+batch_size]
-            )
-            
-    for f in deleted_files:
-        if f in state:
-            del state[f]
-            
-    for f in files_to_process:
-        state[f] = current_files[f]
-        
-    try:
-        with open(state_file, "w") as f:
-            json.dump(state, f, indent=2)
-    except Exception:
-        pass
-        
-    return {
-        "message": "Semantic indexing complete",
-        "status": status,
-        "processed": len(files_to_process),
-        "deleted": len(deleted_files)
-    }
+            set_task_status(repo_name, "semantic_index", "completed")
+        except Exception as e:
+            logger.error(f"Semantic index failed: {e}")
+            set_task_status(repo_name, "semantic_index", "failed")
+
+    background_tasks.add_task(background_semantic_index)
+    return {"status": "processing"}
 
 @app.get("/api/repos/{repo_name}/semantic-search")
 def semantic_search_repo(repo_name: str, q: str):
     if not q or len(q.strip()) == 0:
         return {"results": []}
         
-    repos_dir = Path("data/repos")
+    repos_dir = BASE_DIR / "data/repos"
     target_dir = repos_dir / repo_name
     chroma_dir = target_dir / "chroma"
     
@@ -604,6 +672,7 @@ def semantic_search_repo(repo_name: str, q: str):
 
 from backend.intelligence.graphs.graph_query_service import GraphQueryService
 from pydantic import BaseModel
+from fastapi import BackgroundTasks
 
 class GraphQueryRequest(BaseModel):
     node_id: str
