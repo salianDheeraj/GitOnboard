@@ -6,15 +6,17 @@ Repository Intelligence Platform is a FastAPI + React MVP for importing GitHub r
 
 - FastAPI backend is wired up with repository import, listing, deletion, scan, parse, dependency graph, and call graph endpoints.
 - React frontend has the main dashboard, import flow, and repository detail views.
-- Repository detail view already exposes file explorer, dependency graph, architecture, call graph, search, semantic search, symbols, and summary tabs.
-- Repository metadata is stored locally in `data/repos_metadata.json`, and imported source code is cloned into `data/repos/`.
-- Local Ollama-backed summary generation is connected through `backend/llm_service.py`.
+- Repository detail view exposes file explorer, dependency graph, architecture, call graph, search, semantic search, symbols, and summary tabs.
+- Repository metadata, task status, and analysis artifacts are now stored in **PostgreSQL**.
+- Imported source code is cloned into `data/repos/`.
+- Background tasks (like indexing and LLM summaries) are managed via an in-memory queue, and real-time updates are pushed to the frontend using **Server-Sent Events (SSE)**.
+- Local Ollama-backed summary generation is connected through `backend/llm_service.py` to provide deterministic, context-rich summaries.
 
 ## Tech Stack
 
 - Python 3.10+
-- FastAPI
-- Pydantic Settings
+- FastAPI (with SSE for real-time updates)
+- PostgreSQL & SQLAlchemy
 - ChromaDB
 - React 19
 - Vite
@@ -23,20 +25,22 @@ Repository Intelligence Platform is a FastAPI + React MVP for importing GitHub r
 
 ## Project Structure
 
-- `backend/`: FastAPI app, config, logging, and LLM integration.
+- `backend/`: FastAPI app, database models, background task queue, config, logging, and LLM integration.
 - `frontend/`: React UI for browsing repositories and generated analysis.
-- `data/`: imported repositories and persisted metadata.
-- `docs/`: supporting documentation, including the architecture snapshot.
+- `data/`: Extracted repositories.
+- `docs/`: Supporting documentation, including the architecture snapshot.
 
 ## Run Locally
 
-Backend:
+The backend and database are fully containerized using Docker Compose.
+
+**Backend & Database:**
 
 ```bash
-uv run uvicorn backend.main:app --reload
+docker compose up --build -d
 ```
 
-Frontend:
+**Frontend:**
 
 ```bash
 cd frontend
