@@ -47,6 +47,17 @@ export default function Dashboard() {
     }
   };
 
+  const handleReanalyze = async (e: React.MouseEvent, repoName: string) => {
+    e.preventDefault();
+    try {
+      await repositoryService.reanalyze(repoName);
+      alert(`Re-analysis for ${repoName} started! You can click the repo to see progress.`);
+    } catch (err) {
+      console.error("Failed to re-analyze repo", err);
+      alert("Error re-analyzing repository.");
+    }
+  };
+
   const handleImport = async (e: React.FormEvent) => {
     e.preventDefault();
     setImportError('');
@@ -125,7 +136,13 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <div className="mt-6 pt-4 border-t border-slate-100 flex justify-end">
+                <div className="mt-6 pt-4 border-t border-slate-100 flex justify-end gap-3">
+                  <button 
+                    onClick={(e) => handleReanalyze(e, repo.project_name)}
+                    className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center transition-colors px-2 py-1 rounded hover:bg-blue-50"
+                  >
+                    Re-analyze
+                  </button>
                   <button 
                     onClick={(e) => handleDelete(e, repo.project_name)}
                     className="text-red-500 hover:text-red-700 text-sm font-medium flex items-center transition-colors px-2 py-1 rounded hover:bg-red-50"

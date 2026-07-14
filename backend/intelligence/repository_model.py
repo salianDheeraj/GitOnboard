@@ -110,6 +110,7 @@ class RepositoryAnalyses:
     cycles: Optional[List[Any]] = None
     health: Optional[Any] = None
     findings: Optional[List[Any]] = None
+    enriched_metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
 class AnalysisStatus:
@@ -122,6 +123,7 @@ class AnalysisStatus:
     cycles: bool = False
     health: bool = False
     findings: bool = False
+    enriched_metadata: bool = False
 
 @dataclass
 class RepositoryModel:

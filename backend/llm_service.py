@@ -5,9 +5,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 class LLMService:
-    def __init__(self, base_url="http://localhost:11434"):
-        self.base_url = base_url
-        self.model = "gemma4"
+    def __init__(self, base_url=None):
+        import os
+        self.base_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+        self.model = os.environ.get("OLLAMA_MODEL", "llama3.2") # Use llama3.2 (or phi3) as a smaller fallback
 
     def generate_summary(self, metadata: dict) -> str:
         """
@@ -70,21 +71,25 @@ class LLMService:
     def _build_prompt(self, metadata: dict) -> str:
         metadata_json = json.dumps(metadata, indent=2)
         
-        return f"""You are an expert technical documentation assistant. 
-Your task is to generate a concise, human-readable repository summary based ONLY on the provided JSON metadata.
+        return f"""You are a technical documentation writer. You will write a repository summary using ONLY the data provided below.
 
-Instructions:
-1. Provide a clear overview of the repository based on its name and contents.
-2. List the primary languages and main modules.
-3. Highlight key dependencies and entry points.
-4. Present the information logically using Markdown headings and bullet points.
-5. DO NOT invent facts, infer missing information, or make up dependencies not listed.
-6. Omit information that is unavailable rather than guessing.
+STRICT RULES — violating any of these is an error:
+- Use ONLY the values present in the JSON. Do not invent, guess, or infer anything not explicitly listed.
+- Do NOT use placeholder text like [Language 1], [Framework], [Description], etc. If a value is missing, omit that section entirely.
+- Do NOT write generic filler sentences like "This repository is a comprehensive project" or "It provides a solid foundation."
+- If a field is an empty list, null, or "unknown", skip it — do not mention it at all.
+- Write factual, specific sentences using the real values from the JSON.
+- Keep the summary concise: 100–250 words maximum.
+
+Output format:
+# {metadata.get("repository", {}).get("name", "Repository")} — Summary
+
+Write 2-4 factual bullet-point sections using only data present in the JSON below. Omit any section where the data is empty, null, unknown, or missing.
 
 Repository Metadata:
 {metadata_json}
 
-Generate the Markdown summary below:
+Write the summary now:
 """
 
 llm_service = LLMService()

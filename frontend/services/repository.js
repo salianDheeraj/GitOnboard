@@ -9,5 +9,7 @@ export const repositoryService = {
   
   parseFile: (repoName, filePath) => fetchAPI(`/repos/${repoName}/parse?file_path=${encodeURIComponent(filePath)}`),
   
-  import: (url) => fetchAPI('/import', { method: 'POST', body: JSON.stringify({ url }) })
+  import: (url) => fetchAPI('/import', { method: 'POST', body: JSON.stringify({ url }) }),
+  
+  reanalyze: (repoName) => fetchAPI(`/repos/${repoName}/reanalyze`, { method: 'POST' })
 };

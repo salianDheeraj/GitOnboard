@@ -1,25 +1,30 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useTaskStatus } from '../hooks/useTaskStatus';
 import ReactMarkdown from 'react-markdown';
 
 export default function RepositorySummary({ repoName }) {
   const [summary, setSummary] = useState(null);
   const taskStatus = useTaskStatus(repoName, 'summary');
-  const isGenerating = taskStatus === 'processing';
+  const [localIsGenerating, setLocalIsGenerating] = useState(false);
+  const isGenerating = taskStatus === 'processing' || localIsGenerating;
   const [isOutdated, setIsOutdated] = useState(false);
   const [error, setError] = useState(null);
 
   const fetchSummary = async () => {
     try {
       const res = await fetch(`/api/repos/${repoName}/summary`);
+      if (res.status === 404) return; // No analysis yet, valid state
       if (!res.ok) throw new Error("Failed to fetch summary");
       const data = await res.json();
       setSummary(data.summary);
       setIsOutdated(data.outdated);
     } catch (err) {
-      console.error(err);
+      // Only log truly unexpected errors, not missing summaries
+      if (!err.message.includes("Failed to fetch summary")) {
+        console.error(err);
+      }
     }
   };
 
@@ -28,24 +33,39 @@ export default function RepositorySummary({ repoName }) {
   }, [repoName]);
 
 
+  const prevTaskStatus = useRef(null);
+
   useEffect(() => {
     if (taskStatus === 'completed') {
+      setLocalIsGenerating(false);
       fetchSummary();
+    } else if (taskStatus === 'failed') {
+      setLocalIsGenerating(false);
+      setError("Summary generation failed. Please try again.");
+    } else if (taskStatus === null && prevTaskStatus.current === 'processing') {
+      // Backend restarted or task was lost — reset the spinner
+      setLocalIsGenerating(false);
     }
+    prevTaskStatus.current = taskStatus;
   }, [taskStatus]);
 
   const generateSummary = async () => {
     setError(null);
+    setLocalIsGenerating(true);
     try {
       const res = await fetch(`/api/repos/${repoName}/summary/generate`, {
         method: 'POST'
       });
       if (!res.ok) throw new Error("Failed to generate summary");
       const data = await res.json();
-      setSummary(data.summary);
+      if (data.summary) {
+        setSummary(data.summary);
+      }
       setIsOutdated(false);
+      // Wait for the next poll of useTaskStatus to catch the 'processing' state
     } catch (err) {
       setError(err.message);
+      setLocalIsGenerating(false);
     }
   };
 

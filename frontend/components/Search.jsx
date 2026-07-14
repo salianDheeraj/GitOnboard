@@ -7,17 +7,27 @@ export default function Search({ repoName }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const taskStatus = useTaskStatus(repoName, 'index');
-  const isIndexing = taskStatus === 'processing' || taskStatus === null;
+  const [localIsIndexing, setLocalIsIndexing] = useState(false);
+  // Only show spinner when we KNOW it's actively processing, not on unknown/null
+  const isIndexing = taskStatus === 'processing' || localIsIndexing;
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState(null);
 
-  // Auto-trigger indexing when the component mounts
+  // Clear local spinner when SSE confirms terminal state
+  useEffect(() => {
+    if (taskStatus === 'completed' || taskStatus === 'failed') {
+      setLocalIsIndexing(false);
+    }
+  }, [taskStatus]);
+
+  // Auto-trigger indexing when the component mounts (only if not already done)
   useEffect(() => {
     let isMounted = true;
     
     const buildIndex = async () => {
       setError(null);
+      setLocalIsIndexing(true);
       try {
         const res = await fetch(`/api/repos/${repoName}/index`, {
           method: 'POST'
@@ -25,9 +35,17 @@ export default function Search({ repoName }) {
         if (!res.ok) {
           throw new Error("Failed to build metadata index");
         }
-        // Background indexing task started
+        const data = await res.json();
+        // If backend says already completed, don't show spinner
+        if (data.status === 'completed') {
+          if (isMounted) setLocalIsIndexing(false);
+        }
+        // Otherwise wait for SSE to confirm 'completed'
       } catch (err) {
-        if (isMounted) setError(err.message);
+        if (isMounted) {
+          setError(err.message);
+          setLocalIsIndexing(false);
+        }
       }
     };
     
@@ -37,6 +55,7 @@ export default function Search({ repoName }) {
       isMounted = false;
     };
   }, [repoName]);
+
 
   const handleSearch = async (e) => {
     e.preventDefault();

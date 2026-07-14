@@ -96,6 +96,16 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
     return <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />;
   };
 
+  const handleReanalyze = async () => {
+    try {
+      await fetch(`/api/repos/${repoName}/reanalyze`, { method: 'POST' });
+      // The parent page will pick up the processing status on reload
+      window.location.reload();
+    } catch (err) {
+      alert("Error re-analyzing repository.");
+    }
+  };
+
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">
       
@@ -159,8 +169,8 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button variant="secondary" icon={<RefreshCw className="w-4 h-4" />}>Refresh</Button>
-            <Button variant="primary" icon={<Download className="w-4 h-4" />}>Export</Button>
+            <Button variant="secondary" onClick={() => window.location.reload()} icon={<RefreshCw className="w-4 h-4" />}>Refresh</Button>
+            <Button variant="primary" onClick={handleReanalyze} icon={<RefreshCw className="w-4 h-4" />}>Re-analyze</Button>
           </div>
         </div>
       </div>

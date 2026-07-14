@@ -1,39 +1,42 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
-export function useTaskStatus(repoName, taskName, intervalMs = 2000) {
+export function useTaskStatus(repoName, taskName) {
   const [status, setStatus] = useState(null);
+  const esRef = useRef(null);
 
   useEffect(() => {
     if (!repoName) return;
 
-    let isMounted = true;
-    
-    const fetchStatus = async () => {
+    // Close any existing connection before opening a new one
+    if (esRef.current) {
+      esRef.current.close();
+    }
+
+    const es = new EventSource(`/api/repos/${repoName}/tasks/stream`);
+    esRef.current = es;
+
+    es.onmessage = (event) => {
       try {
-        const res = await fetch(`/api/repos/${repoName}/tasks`);
-        if (!res.ok) return;
-        const tasks = await res.json();
-        if (isMounted) {
-          setStatus(tasks[taskName] || null);
+        const tasks = JSON.parse(event.data);
+        if (taskName in tasks) {
+          setStatus(tasks[taskName]);
         }
-      } catch (err) {
-        console.error("Failed to fetch task status", err);
+      } catch {
+        // Ignore malformed events
       }
     };
 
-    // Initial fetch
-    fetchStatus();
-
-    // Poll interval
-    const intervalId = setInterval(fetchStatus, intervalMs);
+    es.onerror = () => {
+      // Browser auto-reconnects on error — no action needed
+    };
 
     return () => {
-      isMounted = false;
-      clearInterval(intervalId);
+      es.close();
+      esRef.current = null;
     };
-  }, [repoName, taskName, intervalMs]);
+  }, [repoName, taskName]);
 
   return status;
 }
