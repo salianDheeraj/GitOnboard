@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: repository_intelligence
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d repository_intelligence"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the data folder to preserve JSON files
+      - ./data:/app/data
+      # Mount source code for local development
+      - ./backend:/app/backend
+      - ./src:/app/src
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://myuser:mypassword@postgres:5432/repository_intelligence
+      # Other variables will be loaded from .env if present
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

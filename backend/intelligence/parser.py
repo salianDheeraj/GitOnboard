@@ -24,8 +24,13 @@ class LanguageParser:
         if not lang:
             raise ValueError(f"Unsupported extension: {ext}")
         
-        parser = tree_sitter.Parser()
-        parser.set_language(lang)
+        try:
+            parser = tree_sitter.Parser(lang)
+        except TypeError:
+            # Fallback for older tree-sitter versions
+            parser = tree_sitter.Parser()
+            parser.set_language(lang)
+            
         tree = parser.parse(source.encode('utf-8'))
         return tree, lang
 
@@ -70,7 +75,7 @@ class LanguageParser:
                 current_class_id = cls_id
 
             # Functions / Methods
-            elif node.type in ['function_definition', 'function_declaration', 'method_definition', 'method_declaration', 'arrow_function']:
+            elif node.type in ['function_definition', 'function_declaration', 'method_definition', 'method_declaration']:
                 name_node = node.child_by_field_name('name')
                 func_name = get_text(name_node) if name_node else f"AnonymousFn_{node.start_point[0]}"
                 
@@ -98,17 +103,39 @@ class LanguageParser:
                         "source_segment": get_text(node)
                     })
 
-            # Variables
-            elif node.type in ['assignment', 'variable_declarator', 'lexical_declaration']:
-                name_node = node.child_by_field_name('name') or node.child_by_field_name('left')
-                if name_node:
-                    var_name = get_text(name_node)
-                    var_id = f"{module_id}::{var_name}" if module_id else f"{file_id}::{var_name}"
-                    entities["variables"].append({
-                        "id": var_id,
-                        "name": var_name,
-                        "line_number": node.start_point[0] + 1
-                    })
+            # Variables and Arrow Functions
+            elif node.type in ['assignment', 'variable_declarator', 'lexical_declaration', 'variable_declaration']:
+                declarators = []
+                if node.type in ['lexical_declaration', 'variable_declaration']:
+                    declarators = [c for c in node.children if c.type == 'variable_declarator']
+                else:
+                    declarators = [node]
+                    
+                for decl in declarators:
+                    name_node = decl.child_by_field_name('name') or decl.child_by_field_name('left')
+                    val_node = decl.child_by_field_name('value') or decl.child_by_field_name('right')
+                    
+                    if name_node:
+                        var_name = get_text(name_node)
+                        # Check if value is a function
+                        if val_node and val_node.type == 'arrow_function':
+                            fn_id = f"{module_id}::{var_name}" if module_id else f"{file_id}::{var_name}"
+                            entities["functions"].append({
+                                "id": fn_id,
+                                "name": var_name,
+                                "line_number": decl.start_point[0] + 1,
+                                "docstring": "",
+                                "parameters": [],
+                                "is_async": "async" in get_text(val_node).split(),
+                                "source_segment": get_text(decl)
+                            })
+                        else:
+                            var_id = f"{module_id}::{var_name}" if module_id else f"{file_id}::{var_name}"
+                            entities["variables"].append({
+                                "id": var_id,
+                                "name": var_name,
+                                "line_number": decl.start_point[0] + 1
+                            })
 
             for child in node.children:
                 traverse(child, current_class_id)

@@ -133,6 +133,5 @@ class RepositoryBuilder:
                 entities.variables[vr["id"]] = VariableNode(
                     id=vr["id"], name=vr["name"], file_id=file_id, line_number=vr["line_number"]
                 )
-                
         except Exception as e:
-            pass
+            print(f"Error parsing file {pf}: {e}")

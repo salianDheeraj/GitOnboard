@@ -1,11 +1,29 @@
 "use client";
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Search, Sun, Bell, Settings, User } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Search, Sun, Bell, Settings, User, LogOut } from 'lucide-react';
 import { Button } from '../common/Button';
 
 export function Header() {
+  const [user, setUser] = useState(null);
+  const router = useRouter();
+
+  useEffect(() => {
+    // Fetch current user
+    fetch('/api/auth/github/me')
+      .then(res => res.ok ? res.json() : null)
+      .then(data => setUser(data))
+      .catch(() => setUser(null));
+  }, []);
+
+  const handleLogout = async () => {
+    await fetch('/api/auth/github/logout', { method: 'POST' });
+    setUser(null);
+    router.push('/');
+  };
+
   return (
     <header className="h-16 border-b border-slate-200 bg-white flex items-center justify-between px-4 sm:px-6 z-10 flex-shrink-0">
       <div className="flex items-center">
@@ -34,19 +52,28 @@ export function Header() {
       </div>
       
       <div className="flex items-center gap-2 sm:gap-4">
-        <Button variant="ghost" size="icon" className="hidden sm:flex text-slate-500">
-          <Sun className="h-5 w-5" />
-        </Button>
-        <Button variant="ghost" size="icon" className="relative text-slate-500">
-          <Bell className="h-5 w-5" />
-          <span className="absolute top-1.5 right-1.5 block h-2 w-2 rounded-full bg-blue-600 ring-2 ring-white"></span>
-        </Button>
-        <Button variant="ghost" size="icon" className="hidden sm:flex text-slate-500">
-          <Settings className="h-5 w-5" />
-        </Button>
-        <div className="h-8 w-8 rounded-full bg-slate-200 border border-slate-300 overflow-hidden flex items-center justify-center cursor-pointer">
-          <User className="h-5 w-5 text-slate-500" />
-        </div>
+        {user ? (
+          <>
+            <Button variant="ghost" size="icon" className="relative text-slate-500 hidden sm:flex">
+              <Bell className="h-5 w-5" />
+            </Button>
+            <div className="h-8 w-8 rounded-full bg-slate-200 border border-slate-300 overflow-hidden flex items-center justify-center">
+              {user.avatar ? (
+                <img src={user.avatar} alt={user.username} className="h-full w-full object-cover" />
+              ) : (
+                <User className="h-5 w-5 text-slate-500" />
+              )}
+            </div>
+            <Button variant="ghost" size="sm" onClick={handleLogout} className="text-slate-500 hover:text-red-600 flex items-center gap-1">
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">Logout</span>
+            </Button>
+          </>
+        ) : (
+          <Button variant="primary" size="sm" onClick={() => window.location.href = "http://localhost:8000/api/auth/github/login"}>
+            Log In
+          </Button>
+        )}
       </div>
     </header>
   );

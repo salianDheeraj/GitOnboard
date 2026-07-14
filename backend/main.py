@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi import BackgroundTasks
@@ -26,6 +26,11 @@ app = FastAPI(
     version="0.1.0"
 )
 
+# Auto-create database tables
+from backend.database import engine, Base
+from backend.models.user import User
+Base.metadata.create_all(bind=engine)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], # In production, restrict this
@@ -33,6 +38,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from backend.routers import auth_router, health_router
+from backend.dependencies.auth import get_current_user
+
+app.include_router(auth_router, prefix="/api")
+app.include_router(health_router, prefix="/api")
+
+repo_router = APIRouter(prefix="/api/repos", dependencies=[Depends(get_current_user)])
+import_router = APIRouter(prefix="/api/import", dependencies=[Depends(get_current_user)])
+
+
 
 class ImportRequest(BaseModel):
     url: str
@@ -51,8 +67,8 @@ def save_metadata(data):
         json.dump(data, f, indent=2)
 
 
-def get_task_status(repo_name: str, task_name: str):
-    task_file = BASE_DIR / "data" / "repos" / repo_name / ".tasks.json"
+def get_task_status(repo_name: str, task_name: str, current_user: User):
+    task_file = BASE_DIR / "data" / "repos" / f"{current_user.id}_{repo_name}" / ".tasks.json"
     if not task_file.exists():
         return None
     try:
@@ -63,8 +79,8 @@ def get_task_status(repo_name: str, task_name: str):
     except:
         return None
 
-def set_task_status(repo_name: str, task_name: str, status: str):
-    task_file = BASE_DIR / "data" / "repos" / repo_name / ".tasks.json"
+def set_task_status(repo_name: str, task_name: str, status: str, current_user: User):
+    task_file = BASE_DIR / "data" / "repos" / f"{current_user.id}_{repo_name}" / ".tasks.json"
     try:
         import json
         tasks = {}
@@ -80,9 +96,9 @@ def set_task_status(repo_name: str, task_name: str, status: str):
     except Exception as e:
         logger.error(f"Failed to set task status: {e}")
 
-@app.get("/api/repos/{repo_name}/tasks")
-def get_tasks(repo_name: str):
-    task_file = BASE_DIR / "data" / "repos" / repo_name / ".tasks.json"
+@repo_router.get("/{repo_name}/tasks")
+def get_tasks(repo_name: str, current_user: User = Depends(get_current_user)):
+    task_file = BASE_DIR / "data" / "repos" / f"{current_user.id}_{repo_name}" / ".tasks.json"
     tasks = {}
     if task_file.exists():
         try:
@@ -97,8 +113,10 @@ def get_tasks(repo_name: str):
 def read_root():
     return {"message": "Welcome to Repository Intelligence Platform API"}
 
-@app.post("/api/import")
-def import_repo(req: ImportRequest):
+from backend.models.user import User
+
+@import_router.post("")
+def import_repo(req: ImportRequest, current_user: User = Depends(get_current_user)):
     repo_url = req.url
     if not repo_url.startswith("https://github.com/"):
         logger.warning(f"Invalid repository URL attempted: {repo_url}")
@@ -112,28 +130,35 @@ def import_repo(req: ImportRequest):
     repos_dir = BASE_DIR / "data/repos"
     repos_dir.mkdir(parents=True, exist_ok=True)
     
-    target_dir = repos_dir / repo_name
+    # Isolate by user
+    target_dir = repos_dir / f"{current_user.id}_{repo_name}"
     
     if target_dir.exists():
-        logger.info(f"Repository {repo_name} already exists.")
+        logger.info(f"Repository {repo_name} already exists for user {current_user.id}.")
         return {"message": f"Repository {repo_name} already imported.", "repo": repo_name}
 
     logger.info(f"Cloning repository {repo_url} into {target_dir}")
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     
+    # Use authenticated clone URL if we have an access token
+    clone_url = repo_url
+    if current_user.github_access_token:
+        # e.g. https://<token>@github.com/owner/repo
+        clone_url = repo_url.replace("https://", f"https://oauth2:{current_user.github_access_token}@")
+
     try:
         result = subprocess.run(
-            ["git", "clone", "-c", "core.longpaths=true", repo_url, str(target_dir)],
+            ["git", "clone", "-c", "core.longpaths=true", clone_url, str(target_dir)],
             capture_output=True,
             text=True,
             env=env
         )
         if result.returncode != 0:
-            if "Clone succeeded, but checkout failed" in result.stderr or "Clone succeeded, but checkout failed" in result.stdout:
-                logger.warning(f"Clone succeeded with checkout errors: {result.stderr}")
+            logger.error(f"Failed to clone repository: {result.stderr}")
+            if "Authentication failed" in result.stderr or "not found" in result.stderr.lower():
+                raise HTTPException(status_code=400, detail="Failed to clone repository. It may not exist, or you lack permissions to access it.")
             else:
-                logger.error(f"Failed to clone repository: {result.stderr}")
                 raise HTTPException(status_code=500, detail=f"Failed to clone repository: {result.stderr}")
         
         logger.info(f"Successfully cloned {repo_name}")
@@ -171,11 +196,13 @@ def import_repo(req: ImportRequest):
             primary_language = "Unknown"
             
         metadata = load_metadata()
-        metadata[repo_name] = {
+        metadata_key = f"{current_user.id}_{repo_name}"
+        metadata[metadata_key] = {
             "project_name": repo_name,
             "repository_path": str(target_dir),
             "language": primary_language,
-            "import_time": datetime.now(timezone.utc).isoformat()
+            "import_time": datetime.now(timezone.utc).isoformat(),
+            "user_id": current_user.id
         }
         save_metadata(metadata)
         
@@ -186,15 +213,18 @@ def import_repo(req: ImportRequest):
         logger.error(f"Failed to process repository: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to process repository: {str(e)}")
 
-@app.get("/api/repos")
-def list_repos():
+@repo_router.get("")
+def list_repos(current_user: User = Depends(get_current_user)):
     metadata = load_metadata()
-    return {"repositories": list(metadata.values())}
+    # Filter metadata to only return repos owned by the current user
+    user_repos = [repo for repo in metadata.values() if repo.get("user_id") == current_user.id]
+    return {"repositories": user_repos}
 
-@app.delete("/api/repos/{repo_name}")
-def delete_repo(repo_name: str):
+@repo_router.delete("/{repo_name}")
+def delete_repo(repo_name: str, current_user: User = Depends(get_current_user)):
     repos_dir = BASE_DIR / "data/repos"
-    target_dir = repos_dir / repo_name
+    target_dir = repos_dir / f"{current_user.id}_{repo_name}"
+    metadata_key = f"{current_user.id}_{repo_name}"
     
     if not target_dir.exists() or not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -202,11 +232,11 @@ def delete_repo(repo_name: str):
     try:
         shutil.rmtree(target_dir, ignore_errors=True)
         metadata = load_metadata()
-        if repo_name in metadata:
-            del metadata[repo_name]
+        if metadata_key in metadata:
+            del metadata[metadata_key]
             save_metadata(metadata)
             
-        logger.info(f"Deleted repository {repo_name}")
+        logger.info(f"Deleted repository {repo_name} for user {current_user.id}")
         return {"message": "Repository deleted successfully"}
     except Exception as e:
         logger.error(f"Failed to delete repository {repo_name}: {e}")
@@ -227,9 +257,9 @@ from analysis.runner import AnalysisRunner
 
 _model_cache = {}
 
-def get_or_build_model(repo_name: str) -> QueryLayer:
+def get_or_build_model(repo_name: str, current_user: User) -> QueryLayer:
     repos_dir = BASE_DIR / "data/repos"
-    target_dir = repos_dir / repo_name
+    target_dir = repos_dir / f"{current_user.id}_{repo_name}"
     
     if not target_dir.exists() or not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -239,8 +269,8 @@ def get_or_build_model(repo_name: str) -> QueryLayer:
     except Exception:
         current_fingerprint = "0"
         
-    if repo_name in _model_cache:
-        cached_query = _model_cache[repo_name]
+    if f"{current_user.id}_{repo_name}" in _model_cache:
+        cached_query = _model_cache[f"{current_user.id}_{repo_name}"]
         if cached_query.model.metadata.repository_fingerprint == current_fingerprint:
             return cached_query
 
@@ -261,12 +291,12 @@ def get_or_build_model(repo_name: str) -> QueryLayer:
     model.analyses.findings = report.overall_findings
     
     query_layer = QueryLayer(model)
-    _model_cache[repo_name] = query_layer
+    _model_cache[f"{current_user.id}_{repo_name}"] = query_layer
     return query_layer
 
-@app.get("/api/repos/{repo_name}/scan")
-def scan_repo(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/scan")
+def scan_repo(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     metrics = query_layer.model.analyses.metrics
     
     metadata = load_metadata()
@@ -336,9 +366,9 @@ def scan_repo(repo_name: str):
         "files": files_metadata
     }
 
-@app.get("/api/repos/{repo_name}/parse")
-def parse_repo_file(repo_name: str, file_path: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/parse")
+def parse_repo_file(repo_name: str, file_path: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     
     file_node = query_layer.get_file(file_path)
     if not file_node:
@@ -346,18 +376,19 @@ def parse_repo_file(repo_name: str, file_path: str):
         
     classes = query_layer.get_classes_in_file(file_node.id)
     functions = [fn for fn in query_layer.model.entities.functions.values() if fn.file_id == file_node.id]
+    imports = [imp for imp in query_layer.model.entities.imports.values() if imp.file_id == file_node.id]
     
     result = {
-        "imports": [],
+        "imports": [{"module_name": imp.module_name, "alias": imp.alias} for imp in imports],
         "functions": [{"name": f.name, "docstring": f.docstring, "line_number": f.line_number, "parameters": f.parameters} for f in functions],
         "classes": [{"name": c.name, "docstring": c.docstring, "methods": [{"name": m.name, "docstring": m.docstring} for m in query_layer.model.entities.methods.values() if m.class_id == c.id]} for c in classes],
         "docstring": ""
     }
     return result
 
-@app.get("/api/repos/{repo_name}/dependencies")
-def get_dependencies(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/dependencies")
+def get_dependencies(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     dep_graph = DependencyGraphView(query_layer.model)
     
     from backend.intelligence.parser import LanguageParser
@@ -387,9 +418,9 @@ def get_dependencies(repo_name: str):
     
     return {"nodes": nodes, "edges": edges}
 
-@app.get("/api/repos/{repo_name}/call-graph")
-def get_call_graph(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/call-graph")
+def get_call_graph(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     call_graph = CallGraphView(query_layer.model)
     
     nodes = [{"id": n, "label": n.split('::')[-1], "full_name": n} for n in call_graph.get_nodes()]
@@ -397,9 +428,9 @@ def get_call_graph(repo_name: str):
     
     return {"nodes": nodes, "edges": edges}
 
-@app.get("/api/repos/{repo_name}/architecture")
-def get_architecture(repo_name: str, node_id: str = "root"):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/architecture")
+def get_architecture(repo_name: str, node_id: str = "root", current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     nodes = []
     
     if node_id == "root":
@@ -431,30 +462,30 @@ def get_architecture(repo_name: str, node_id: str = "root"):
             
     return {"nodes": nodes}
 
-@app.post("/api/repos/{repo_name}/index")
-def index_repo(repo_name: str, background_tasks: BackgroundTasks):
-    current_status = get_task_status(repo_name, "index")
+@repo_router.post("/{repo_name}/index")
+def index_repo(repo_name: str, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
+    current_status = get_task_status(repo_name, "index", current_user)
     if current_status == "processing":
         return {"status": "processing"}
         
-    set_task_status(repo_name, "index", "processing")
+    set_task_status(repo_name, "index", "processing", current_user)
     
     def background_index():
         try:
-            query_layer = get_or_build_model(repo_name)
-            set_task_status(repo_name, "index", "completed")
+            query_layer = get_or_build_model(repo_name, current_user)
+            set_task_status(repo_name, "index", "completed", current_user)
         except Exception as e:
             logger.error(f"Index failed: {e}")
-            set_task_status(repo_name, "index", "failed")
+            set_task_status(repo_name, "index", "failed", current_user)
             
     background_tasks.add_task(background_index)
     return {"status": "processing"}
 
-@app.get("/api/repos/{repo_name}/search")
-def search_repo(repo_name: str, q: str):
+@repo_router.get("/{repo_name}/search")
+def search_repo(repo_name: str, q: str, current_user: User = Depends(get_current_user)):
     if not q or len(q.strip()) == 0:
         return {"results": []}
-    query_layer = get_or_build_model(repo_name)
+    query_layer = get_or_build_model(repo_name, current_user)
     results = query_layer.search_entities(q)
     formatted = []
     for r in results:
@@ -464,28 +495,28 @@ def search_repo(repo_name: str, q: str):
         })
     return {"results": formatted}
 
-@app.post("/api/repos/{repo_name}/symbols/index")
-def index_symbols(repo_name: str, background_tasks: BackgroundTasks):
-    current_status = get_task_status(repo_name, "symbols_index")
+@repo_router.post("/{repo_name}/symbols/index")
+def index_symbols(repo_name: str, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
+    current_status = get_task_status(repo_name, "symbols_index", current_user)
     if current_status == "processing":
         return {"status": "processing"}
         
-    set_task_status(repo_name, "symbols_index", "processing")
+    set_task_status(repo_name, "symbols_index", "processing", current_user)
     
     def background_symbols_index():
         try:
-            query_layer = get_or_build_model(repo_name)
-            set_task_status(repo_name, "symbols_index", "completed")
+            query_layer = get_or_build_model(repo_name, current_user)
+            set_task_status(repo_name, "symbols_index", "completed", current_user)
         except Exception as e:
             logger.error(f"Symbols index failed: {e}")
-            set_task_status(repo_name, "symbols_index", "failed")
+            set_task_status(repo_name, "symbols_index", "failed", current_user)
             
     background_tasks.add_task(background_symbols_index)
     return {"status": "processing"}
 
-@app.get("/api/repos/{repo_name}/symbols")
-def get_symbols(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/symbols")
+def get_symbols(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     symbols = []
     for c in query_layer.model.entities.classes.values():
         symbols.append({"id": c.id, "type": "Class", "name": c.name, "file_path": c.file_id, "line_number": c.line_number, "docstring": c.docstring})
@@ -495,11 +526,11 @@ def get_symbols(repo_name: str):
         symbols.append({"id": m.id, "type": "Method", "name": m.name, "file_path": m.file_id, "line_number": m.line_number, "docstring": m.docstring})
     return {"symbols": symbols}
 
-@app.get("/api/repos/{repo_name}/symbols/search")
-def search_symbols(repo_name: str, q: str):
+@repo_router.get("/{repo_name}/symbols/search")
+def search_symbols(repo_name: str, q: str, current_user: User = Depends(get_current_user)):
     if not q:
         return {"results": []}
-    query_layer = get_or_build_model(repo_name)
+    query_layer = get_or_build_model(repo_name, current_user)
     q_lower = q.lower()
     results = []
     for c in query_layer.model.entities.classes.values():
@@ -510,15 +541,15 @@ def search_symbols(repo_name: str, q: str):
             results.append({"id": f.id, "type": "Function", "name": f.name, "file_path": f.file_id, "line_number": f.line_number})
     return {"results": results}
     
-@app.get("/api/repos/{repo_name}/stats")
-def get_stats(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/stats")
+def get_stats(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     return query_layer.model.analyses.metrics
 
-@app.get("/api/repos/{repo_name}/summary")
-def get_summary(repo_name: str):
+@repo_router.get("/{repo_name}/summary")
+def get_summary(repo_name: str, current_user: User = Depends(get_current_user)):
     repos_dir = BASE_DIR / "data/repos"
-    target_dir = repos_dir / repo_name
+    target_dir = repos_dir / f"{current_user.id}_{repo_name}"
     
     if not target_dir.exists() or not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -545,19 +576,19 @@ def get_summary(repo_name: str):
         logger.error(f"Failed to read summary: {e}")
         raise HTTPException(status_code=500, detail="Failed to read summary")
 
-@app.post("/api/repos/{repo_name}/summary/generate")
-def generate_summary(repo_name: str, background_tasks: BackgroundTasks):
-    current_status = get_task_status(repo_name, "summary")
+@repo_router.post("/{repo_name}/summary/generate")
+def generate_summary(repo_name: str, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
+    current_status = get_task_status(repo_name, "summary", current_user)
     if current_status == "processing":
         return {"status": "processing"}
     
-    set_task_status(repo_name, "summary", "processing")
+    set_task_status(repo_name, "summary", "processing", current_user)
     
     def background_generate_summary():
         try:
             repos_dir = BASE_DIR / "data/repos"
-            target_dir = repos_dir / repo_name
-            query_layer = get_or_build_model(repo_name)
+            target_dir = repos_dir / f"{current_user.id}_{repo_name}"
+            query_layer = get_or_build_model(repo_name, current_user)
             metrics = query_layer.model.analyses.metrics
             metadata = {
                 "name": repo_name,
@@ -570,37 +601,37 @@ def generate_summary(repo_name: str, background_tasks: BackgroundTasks):
             summary_file = target_dir / "summary.md"
             with open(summary_file, "w", encoding="utf-8") as f:
                 f.write(summary_md)
-            set_task_status(repo_name, "summary", "completed")
+            set_task_status(repo_name, "summary", "completed", current_user)
         except Exception as e:
             import traceback
             logger.error(f"Summary generation failed: \\n{traceback.format_exc()}")
-            set_task_status(repo_name, "summary", "failed")
+            set_task_status(repo_name, "summary", "failed", current_user)
             
     background_tasks.add_task(background_generate_summary)
     return {"status": "processing"}
 
-@app.get("/api/repos/{repo_name}/semantic-status")
-def semantic_status_repo(repo_name: str):
+@repo_router.get("/{repo_name}/semantic-status")
+def semantic_status_repo(repo_name: str, current_user: User = Depends(get_current_user)):
     repos_dir = BASE_DIR / "data/repos"
-    target_dir = repos_dir / repo_name
+    target_dir = repos_dir / f"{current_user.id}_{repo_name}"
     if not target_dir.exists() or not target_dir.is_dir():
         raise HTTPException(status_code=404, detail="Repository not found")
         
     state_file = target_dir / "semantic_index_state.json"
     return {"has_index": state_file.exists()}
 
-@app.post("/api/repos/{repo_name}/semantic-index")
-def semantic_index_repo(repo_name: str, background_tasks: BackgroundTasks):
-    current_status = get_task_status(repo_name, "semantic_index")
+@repo_router.post("/{repo_name}/semantic-index")
+def semantic_index_repo(repo_name: str, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
+    current_status = get_task_status(repo_name, "semantic_index", current_user)
     if current_status == "processing":
         return {"status": "processing"}
         
-    set_task_status(repo_name, "semantic_index", "processing")
+    set_task_status(repo_name, "semantic_index", "processing", current_user)
     
     def background_semantic_index():
         try:
-            query_layer = get_or_build_model(repo_name)
-            target_dir = BASE_DIR / "data/repos" / repo_name
+            query_layer = get_or_build_model(repo_name, current_user)
+            target_dir = BASE_DIR / "data/repos" / f"{current_user.id}_{repo_name}"
             chroma_dir = target_dir / "chroma"
             chroma_dir.mkdir(parents=True, exist_ok=True)
             state_file = target_dir / "semantic_index_state.json"
@@ -636,7 +667,7 @@ def semantic_index_repo(repo_name: str, background_tasks: BackgroundTasks):
             elif files_to_process or files_to_delete_chunks:
                 status = "updated"
             if not files_to_process and not files_to_delete_chunks:
-                set_task_status(repo_name, "semantic_index", "completed")
+                set_task_status(repo_name, "semantic_index", "completed", current_user)
                 return
             if files_to_delete_chunks:
                 for f in files_to_delete_chunks:
@@ -713,21 +744,21 @@ def semantic_index_repo(repo_name: str, background_tasks: BackgroundTasks):
                     json.dump(state, f, indent=2)
             except Exception:
                 pass
-            set_task_status(repo_name, "semantic_index", "completed")
+            set_task_status(repo_name, "semantic_index", "completed", current_user)
         except Exception as e:
             logger.error(f"Semantic index failed: {e}")
-            set_task_status(repo_name, "semantic_index", "failed")
+            set_task_status(repo_name, "semantic_index", "failed", current_user)
 
     background_tasks.add_task(background_semantic_index)
     return {"status": "processing"}
 
-@app.get("/api/repos/{repo_name}/semantic-search")
-def semantic_search_repo(repo_name: str, q: str):
+@repo_router.get("/{repo_name}/semantic-search")
+def semantic_search_repo(repo_name: str, q: str, current_user: User = Depends(get_current_user)):
     if not q or len(q.strip()) == 0:
         return {"results": []}
         
     repos_dir = BASE_DIR / "data/repos"
-    target_dir = repos_dir / repo_name
+    target_dir = repos_dir / f"{current_user.id}_{repo_name}"
     chroma_dir = target_dir / "chroma"
     
     if not target_dir.exists() or not target_dir.is_dir():
@@ -770,15 +801,15 @@ class GraphQueryRequest(BaseModel):
     max_nodes: int = 50
     relationship_type: str = "calls"
 
-@app.get("/api/repos/{repo_name}/graph/search")
-def graph_search(repo_name: str, q: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/graph/search")
+def graph_search(repo_name: str, q: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     service = GraphQueryService(query_layer.model)
     return {"results": service.search(q)}
 
-@app.post("/api/repos/{repo_name}/graph/query")
-def graph_query(repo_name: str, req: GraphQueryRequest):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.post("/{repo_name}/graph/query")
+def graph_query(repo_name: str, req: GraphQueryRequest, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     service = GraphQueryService(query_layer.model)
     result = service.traverse(
         node_id=req.node_id,
@@ -808,38 +839,38 @@ def _serialize_dataclass(obj):
         return [_serialize_dataclass(v) for v in obj]
     return obj
 
-@app.get("/api/repos/{repo_name}/health/scores")
-def get_health_scores(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/scores")
+def get_health_scores(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     health = getattr(query_layer.model.analyses, "health", None)
     if not health:
         raise HTTPException(status_code=404, detail="Health scores not found")
     return _serialize_dataclass(health)
 
-@app.get("/api/repos/{repo_name}/health/metrics")
-def get_health_metrics(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/metrics")
+def get_health_metrics(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     metrics = getattr(query_layer.model.analyses, "metrics", None)
     if not metrics:
         raise HTTPException(status_code=404, detail="Metrics not found")
     return _serialize_dataclass(metrics)
 
-@app.get("/api/repos/{repo_name}/health/findings")
-def get_health_findings(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/findings")
+def get_health_findings(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     findings = getattr(query_layer.model.analyses, "findings", [])
     return {"findings": _serialize_dataclass(findings)}
 
-@app.get("/api/repos/{repo_name}/health/layers")
-def get_health_layers(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/layers")
+def get_health_layers(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     architecture = getattr(query_layer.model.analyses, "architecture", {})
     layers = [{"module_id": k, "layer": _serialize_dataclass(v)} for k, v in architecture.items()]
     return {"layers": layers}
 
-@app.get("/api/repos/{repo_name}/health/dependencies")
-def get_health_dependencies(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/dependencies")
+def get_health_dependencies(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     dep_graph = getattr(query_layer.model.analyses, "dependency_graph", None)
     if not dep_graph:
         return {"edges": []}
@@ -847,22 +878,22 @@ def get_health_dependencies(repo_name: str):
     edges = getattr(dep_graph, "edges", None) or []
     return {"edges": _serialize_dataclass(edges)}
 
-@app.get("/api/repos/{repo_name}/health/cycles")
-def get_health_cycles(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/cycles")
+def get_health_cycles(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     cycles = getattr(query_layer.model.analyses, "cycles", None) or []
     return {"cycles": _serialize_dataclass(cycles)}
 
-@app.get("/api/repos/{repo_name}/health/dead-code")
-def get_health_dead_code(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/dead-code")
+def get_health_dead_code(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     findings = getattr(query_layer.model.analyses, "findings", None) or []
     dead_code = [f for f in findings if "Unused" in f.title or "Unreachable" in f.title]
     return {"findings": _serialize_dataclass(dead_code)}
 
-@app.get("/api/repos/{repo_name}/health/smells")
-def get_health_smells(repo_name: str):
-    query_layer = get_or_build_model(repo_name)
+@repo_router.get("/{repo_name}/health/smells")
+def get_health_smells(repo_name: str, current_user: User = Depends(get_current_user)):
+    query_layer = get_or_build_model(repo_name, current_user)
     cycles = getattr(query_layer.model.analyses, "cycles", None) or []
     findings = getattr(query_layer.model.analyses, "findings", None) or []
     
@@ -890,14 +921,14 @@ def get_health_smells(repo_name: str):
     return {"smells": smells}
 
 # --- Phase 3: Feature Tracing ---
-@app.get("/api/repos/{repo_name}/trace")
+@repo_router.get("/{repo_name}/trace")
 def trace_feature(repo_name: str, q: str):
     if not q or len(q.strip()) == 0:
         return {"trace": None}
         
     # Stage 1: Semantic search
     repos_dir = BASE_DIR / "data/repos"
-    target_dir = repos_dir / repo_name
+    target_dir = repos_dir / f"{current_user.id}_{repo_name}"
     chroma_dir = target_dir / "chroma"
     
     if not target_dir.exists() or not target_dir.is_dir():
@@ -911,7 +942,7 @@ def trace_feature(repo_name: str, q: str):
         if query_results and query_results.get("metadatas") and len(query_results["metadatas"]) > 0:
             # We need query_layer to resolve actual entity IDs
             try:
-                query_layer = get_or_build_model(repo_name)
+                query_layer = get_or_build_model(repo_name, current_user)
             except Exception as e:
                 logger.error(f"Failed to build model for trace: {e}")
                 return {"trace": None}
@@ -945,9 +976,9 @@ def trace_feature(repo_name: str, q: str):
         
     # Get repository model
     # In main.py there is get_or_build_model
-    # Let's see how get_or_build_model is defined in main.py... oh it's query_layer = get_or_build_model(repo_name)
+    # Let's see how get_or_build_model is defined in main.py... oh it's query_layer = get_or_build_model(repo_name, current_user)
     try:
-        query_layer = get_or_build_model(repo_name)
+        query_layer = get_or_build_model(repo_name, current_user)
     except Exception as e:
         logger.error(f"Failed to build model for trace: {e}")
         return {"trace": None}
@@ -962,7 +993,7 @@ class ExplainTraceRequest(BaseModel):
     feature_query: str
     trace_data: dict
 
-@app.post("/api/repos/{repo_name}/trace/explain")
+@repo_router.post("/{repo_name}/trace/explain")
 def explain_trace(repo_name: str, req: ExplainTraceRequest):
     prompt = f"Explain the following implementation trace for the feature '{req.feature_query}'. The trace was deterministically generated from the repository's semantic, dependency, and call graphs. Do not add any new nodes or hallucinate execution paths. Explain what each component does in the context of the flow.\n\nTrace Data: {json.dumps(req.trace_data, indent=2)}"
     
@@ -972,3 +1003,6 @@ def explain_trace(repo_name: str, req: ExplainTraceRequest):
     except Exception as e:
         logger.error(f"Explanation failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate explanation")
+
+app.include_router(repo_router)
+app.include_router(import_router)

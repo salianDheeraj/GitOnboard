@@ -165,7 +165,7 @@ export default function CodeDetailsViewer({
                     <ul className="grid grid-cols-1 md:grid-cols-2 gap-2">
                       {astData.imports.map((imp, i) => (
                         <li key={i} className="text-base text-gray-700 bg-gray-50 px-3 py-2 rounded border border-gray-200 font-mono break-all">
-                          {imp}
+                          {imp.module_name} {imp.alias ? `(as ${imp.alias})` : ''}
                         </li>
                       ))}
                     </ul>

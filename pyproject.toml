@@ -18,6 +18,11 @@ dependencies = [
     "tree-sitter-cpp>=0.23.4",
     "tree-sitter-go>=0.25.0",
     "tree-sitter-ruby>=0.23.1",
+    "sqlalchemy",
+    "psycopg",
+    "alembic",
+    "httpx",
+    "PyJWT",
 ]
 
 [tool.ruff]
