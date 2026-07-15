@@ -1,0 +1,11 @@
+id: chat
+name: Repository Chat
+intents:
+  - Explain Feature
+  - Trace Execution
+knowledge_requirements:
+  - features
+  - capabilities
+  - representative_sources
+prompt_template: chat.j2
+output_type: markdown

@@ -1,0 +1,11 @@
+id: planning
+name: Planning Assistant
+intents:
+  - Impact Analysis
+  - Planning
+knowledge_requirements:
+  - features
+  - patterns
+  - call_paths
+prompt_template: planning.j2
+output_type: markdown

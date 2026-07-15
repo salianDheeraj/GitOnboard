@@ -1,0 +1,11 @@
+id: documentation
+name: Documentation Generator
+intents:
+  - Generate Documentation
+knowledge_requirements:
+  - features
+  - capabilities
+  - patterns
+  - call_paths
+prompt_template: documentation.j2
+output_type: markdown
