@@ -81,6 +81,7 @@ class AnalysisWorker(WorkerInterface):
                     from backend.intelligence.engine.analyzers import get_default_registry
                     from backend.intelligence.patterns.engine import PatternRecognitionEngine
                     from backend.intelligence.patterns.registry import PatternRegistry
+                    from backend.intelligence.capabilities.engine import CapabilityBuilderEngine
                     from backend.intelligence.rim.serialization import serialize_rim
                     
                     # Run Phase 2 Static Analysis Pipeline
@@ -91,6 +92,10 @@ class AnalysisWorker(WorkerInterface):
                     pattern_registry = PatternRegistry()
                     pattern_engine = PatternRecognitionEngine(pattern_registry)
                     model = pattern_engine.run(model)
+                    
+                    # Run Phase 4 Capability Engine
+                    capability_engine = CapabilityBuilderEngine()
+                    model = capability_engine.run(model)
                     
                     # Serialize the populated RIM
                     json_str = serialize_rim(model)

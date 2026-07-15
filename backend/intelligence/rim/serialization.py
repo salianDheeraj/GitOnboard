@@ -11,7 +11,9 @@ def serialize_rim(model: RepositoryModel) -> str:
         "repository": model.metadata.model_dump(),
         "entities": [e.model_dump() for e in model.entities.values()],
         "relationships": [r.model_dump() for r in model.relationships.values()],
-        "patterns": [p.model_dump() for p in getattr(model, 'patterns', {}).values()]
+        "patterns": [p.model_dump() for p in getattr(model, 'patterns', {}).values()],
+        "capabilities": [c.model_dump() for c in getattr(model, 'capabilities', {}).values()],
+        "capability_relationships": [r.model_dump() for r in getattr(model, 'capability_relationships', {}).values()]
     }
     return json.dumps(data, indent=2)
 
@@ -25,12 +27,16 @@ def deserialize_rim(json_str: str) -> RepositoryModel:
     entities_map = {e["id"]: e for e in data.get("entities", [])}
     relationships_map = {r["id"]: r for r in data.get("relationships", [])}
     patterns_map = {p["id"]: p for p in data.get("patterns", [])}
+    capabilities_map = {c["id"]: c for c in data.get("capabilities", [])}
+    cap_rels_map = {r["id"]: r for r in data.get("capability_relationships", [])}
     
     model_data = {
         "metadata": data.get("repository", {}),
         "entities": entities_map,
         "relationships": relationships_map,
-        "patterns": patterns_map
+        "patterns": patterns_map,
+        "capabilities": capabilities_map,
+        "capability_relationships": cap_rels_map
     }
     
     return RepositoryModel.model_validate(model_data)
