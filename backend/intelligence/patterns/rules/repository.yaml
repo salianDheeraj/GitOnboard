@@ -1,0 +1,24 @@
+name: Repository Pattern
+category: BACKEND
+type: REPOSITORY
+
+participants:
+  service:
+    type: CLASS
+    name_pattern: ".*(?i)Service.*"
+  repository:
+    type: CLASS
+    name_pattern: ".*(?i)Repository.*"
+  table:
+    type: TABLE
+
+relationships:
+  - source: service
+    target: repository
+    type: USES
+  - source: repository
+    target: table
+    type: USES
+
+confidence:
+  base: 0.95

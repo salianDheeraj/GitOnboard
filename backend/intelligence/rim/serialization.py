@@ -10,7 +10,8 @@ def serialize_rim(model: RepositoryModel) -> str:
         "version": "1.0",
         "repository": model.metadata.model_dump(),
         "entities": [e.model_dump() for e in model.entities.values()],
-        "relationships": [r.model_dump() for r in model.relationships.values()]
+        "relationships": [r.model_dump() for r in model.relationships.values()],
+        "patterns": [p.model_dump() for p in getattr(model, 'patterns', {}).values()]
     }
     return json.dumps(data, indent=2)
 
@@ -23,11 +24,13 @@ def deserialize_rim(json_str: str) -> RepositoryModel:
     # Reconstruct dictionary maps from lists
     entities_map = {e["id"]: e for e in data.get("entities", [])}
     relationships_map = {r["id"]: r for r in data.get("relationships", [])}
+    patterns_map = {p["id"]: p for p in data.get("patterns", [])}
     
     model_data = {
         "metadata": data.get("repository", {}),
         "entities": entities_map,
-        "relationships": relationships_map
+        "relationships": relationships_map,
+        "patterns": patterns_map
     }
     
     return RepositoryModel.model_validate(model_data)

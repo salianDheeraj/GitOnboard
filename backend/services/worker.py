@@ -79,11 +79,18 @@ class AnalysisWorker(WorkerInterface):
                 def run_analysis():
                     from backend.intelligence.engine.orchestration.pipeline import AnalysisEngine
                     from backend.intelligence.engine.analyzers import get_default_registry
+                    from backend.intelligence.patterns.engine import PatternRecognitionEngine
+                    from backend.intelligence.patterns.registry import PatternRegistry
                     from backend.intelligence.rim.serialization import serialize_rim
                     
                     # Run Phase 2 Static Analysis Pipeline
                     engine = AnalysisEngine(str(target_dir), get_default_registry())
                     model = engine.run(repo_name)
+                    
+                    # Run Phase 3 Pattern Recognition Engine
+                    pattern_registry = PatternRegistry()
+                    pattern_engine = PatternRecognitionEngine(pattern_registry)
+                    model = pattern_engine.run(model)
                     
                     # Serialize the populated RIM
                     json_str = serialize_rim(model)
