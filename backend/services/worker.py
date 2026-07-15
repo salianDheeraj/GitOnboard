@@ -77,164 +77,19 @@ class AnalysisWorker(WorkerInterface):
 
                 # 2. Analyze
                 def run_analysis():
-                    builder = RepositoryBuilder(repo_name, target_dir)
-                    rel_builder = RelationshipBuilder(target_dir)
-                    pipeline = AnalysisPipeline(builder, rel_builder)
-                    pipeline.add_stage(MetricsStage(str(target_dir)))
+                    from backend.intelligence.engine.orchestration.pipeline import AnalysisEngine
+                    from backend.intelligence.engine.analyzers import get_default_registry
+                    from backend.intelligence.rim.serialization import serialize_rim
                     
-                    from backend.intelligence.stages.metadata_stage import RepositoryMetadataStage
-                    pipeline.add_stage(RepositoryMetadataStage(str(target_dir)))
+                    # Run Phase 2 Static Analysis Pipeline
+                    engine = AnalysisEngine(str(target_dir), get_default_registry())
+                    model = engine.run(repo_name)
                     
-                    model = pipeline.run()
+                    # Serialize the populated RIM
+                    json_str = serialize_rim(model)
                     
-                    import pickle
-                    try:
-                        model_blob = pickle.dumps(model)
-                        model_artifact = AnalysisArtifact(
-                            analysis_id=analysis.id,
-                            type="core_model",
-                            data={},
-                            blob_data=model_blob
-                        )
-                        db.add(model_artifact)
-                    except Exception as e:
-                        logger.error(f"Failed to pickle core_model: {e}")
-                        
-                    from analysis.registry import AnalyzerRegistry
-                    from analysis.runner import AnalysisRunner
-                    import sys
-                    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
-                    
-                    registry = AnalyzerRegistry()
-                    registry.discover("analysis.plugins")
-                    runner = AnalysisRunner(registry)
-                    report = runner.run(model)
-                    model.analyses.findings = report.overall_findings
-                    
-                    import pickle
-                    try:
-                        model_blob = pickle.dumps(model)
-                        model_artifact = AnalysisArtifact(
-                            analysis_id=analysis.id,
-                            type="core_model",
-                            data={},
-                            blob_data=model_blob
-                        )
-                        db.add(model_artifact)
-                    except Exception as e:
-                        logger.error(f"Failed to pickle core_model: {e}")
-                    
-                    from backend.intelligence import QueryLayer
-                    query = QueryLayer(model)
-                    
-                    # Pre-calculate API responses
-                    from backend.intelligence.graphs.dependency_graph import DependencyGraphView
-                    from backend.intelligence.graphs.call_graph import CallGraphView
-                    
-                    dep_graph = DependencyGraphView(model)
-                    call_graph = CallGraphView(model)
-                    
-                    # Symbols
-                    symbols = []
-                    for c in query.model.entities.classes.values():
-                        symbols.append({"id": c.id, "type": "Class", "name": c.name, "file_path": c.file_id, "line_number": c.line_number, "docstring": c.docstring})
-                    for f in query.model.entities.functions.values():
-                        symbols.append({"id": f.id, "type": "Function", "name": f.name, "file_path": f.file_id, "line_number": f.line_number, "docstring": f.docstring})
-                    for m in query.model.entities.methods.values():
-                        symbols.append({"id": m.id, "type": "Method", "name": m.name, "file_path": m.file_id, "line_number": m.line_number, "docstring": m.docstring})
-                        
-                    # Dependency Edges/Nodes
-                    from backend.intelligence.parser import LanguageParser
-                    parser = LanguageParser()
-                    lang_map = {
-                        ".py": "Python", 
-                        ".js": "JavaScript", 
-                        ".ts": "TypeScript", 
-                        ".jsx": "JavaScript", 
-                        ".tsx": "TypeScript", 
-                        ".java": "Java"
-                    }
-                    dep_nodes = []
-                    for f in query.get_files():
-                        ext = f.extension.lower()
-                        if parser.supports_extension(ext):
-                            dep_nodes.append({
-                                "id": f.path, 
-                                "label": f.name, 
-                                "full_path": f.path,
-                                "language": lang_map.get(ext, "Unknown")
-                            })
-                    dep_edges = [{"id": f"e-{s}-{t}", "source": s, "target": t} for s, targets in dep_graph.get_edges().items() for t in targets]
-                    
-                    # Call graph edges
-                    cg_nodes = [{"id": n, "label": n.split('::')[-1], "full_name": n} for n in call_graph.get_nodes()]
-                    cg_edges = [{"id": f"e-{s}-{t}", "source": s, "target": t} for s, targets in call_graph.get_edges().items() for t in targets]
-                    # Build Semantic Index
-                    import chromadb
-                    import uuid
-                    chroma_dir = target_dir / "chroma"
-                    chroma_dir.mkdir(parents=True, exist_ok=True)
-                    client = chromadb.PersistentClient(path=str(chroma_dir.absolute()))
-                    collection = client.get_or_create_collection(name="semantic_index")
-                    
-                    documents = []
-                    metadatas = []
-                    ids = []
-                    for f_node in query.get_files():
-                        pf = target_dir / f_node.path
-                        ext = pf.suffix.lower()
-                        if not parser.supports_extension(ext):
-                            continue
-                            
-                        try:
-                            with open(pf, "r", encoding="utf-8") as f:
-                                source = f.read()
-                            tree, _ = parser.parse_source(source, ext)
-                            parsed_entities = parser.extract_entities(tree, source, f_node.path, "")
-                            
-                            for cls in parsed_entities.get("classes", []):
-                                if cls.get("source_segment"):
-                                    documents.append(cls["source_segment"])
-                                    metadatas.append({"file_path": f_node.path, "type": "class", "name": cls["name"]})
-                                    ids.append(str(uuid.uuid4()))
-                                    
-                            for fn in parsed_entities.get("functions", []):
-                                if fn.get("source_segment"):
-                                    documents.append(fn["source_segment"])
-                                    metadatas.append({"file_path": f_node.path, "type": "function", "name": fn["name"]})
-                                    ids.append(str(uuid.uuid4()))
-                                    
-                            for md in parsed_entities.get("methods", []):
-                                if md.get("source_segment"):
-                                    documents.append(md["source_segment"])
-                                    metadatas.append({"file_path": f_node.path, "type": "method", "name": md["name"]})
-                                    ids.append(str(uuid.uuid4()))
-                        except Exception:
-                            pass
-                            
-                    if documents:
-                        batch_size = 2000
-                        for i in range(0, len(documents), batch_size):
-                            collection.upsert(
-                                documents=documents[i:i+batch_size],
-                                metadatas=metadatas[i:i+batch_size],
-                                ids=ids[i:i+batch_size]
-                            )
-                            
-                    import shutil
-                    zip_path = shutil.make_archive(str(target_dir / "chroma_zip"), 'zip', str(chroma_dir))
-                    with open(zip_path, "rb") as f:
-                        chroma_blob = f.read()
-
                     return {
-                        "metrics": getattr(model.analyses, "metrics", {}),
-                        "findings": getattr(model.analyses, "findings", []),
-                        "cycles": getattr(model.analyses, "cycles", []),
-                        "symbols": symbols,
-                        "dependencies": {"nodes": dep_nodes, "edges": dep_edges},
-                        "call_graph": {"nodes": cg_nodes, "edges": cg_edges},
-                        "enriched_metadata": getattr(model.analyses, "enriched_metadata", {}),
-                        "semantic_index_db": chroma_blob
+                        "core_model": json_str.encode("utf-8")
                     }
 
                 logger.info(f"Analyzing {repo_name}...")
