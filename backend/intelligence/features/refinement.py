@@ -1,6 +1,6 @@
 from typing import List
-from ...rim.repository import RepositoryModel
-from ...capabilities.model import Capability
+from ..rim.repository import RepositoryModel
+from ..capabilities.model import Capability
 
 class RefinementEngine:
     """

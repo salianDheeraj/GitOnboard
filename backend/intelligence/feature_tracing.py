@@ -1,5 +1,6 @@
 from typing import List, Dict, Set, Any
-from backend.intelligence.repository_model import RepositoryModel
+from backend.intelligence.rim.repository import RepositoryModel
+from backend.intelligence.rim.enums import EntityType, RelationshipType
 
 class DeterministicTracer:
     def __init__(self, model: RepositoryModel):
@@ -11,152 +12,125 @@ class DeterministicTracer:
         seed_nodes: list of metadata dicts from semantic search, e.g., [{"id": "...", "type": "...", "name": "..."}]
         """
         
+        # Build relationship lookup maps from flat relationships dict
+        calls_out: Dict[str, List[str]] = {}       # source -> [targets]
+        calls_in: Dict[str, List[str]] = {}         # target -> [sources]
+        imports_out: Dict[str, List[str]] = {}
+        depends_out: Dict[str, List[str]] = {}
+        depends_in: Dict[str, List[str]] = {}
+        
+        for rel in self.model.relationships.values():
+            rel_type = rel.type.value if hasattr(rel.type, 'value') else str(rel.type)
+            src, tgt = rel.source_id, rel.target_id
+            if rel_type == "CALLS":
+                calls_out.setdefault(src, []).append(tgt)
+                calls_in.setdefault(tgt, []).append(src)
+            elif rel_type == "IMPORTS":
+                imports_out.setdefault(src, []).append(tgt)
+            elif rel_type == "DEPENDS_ON":
+                depends_out.setdefault(src, []).append(tgt)
+                depends_in.setdefault(tgt, []).append(src)
+
         # Stage 1: Collect seed IDs
-        active_ids = {node["id"] for node in seed_nodes if "id" in node}
+        active_ids: Set[str] = {node["id"] for node in seed_nodes if "id" in node}
         
-        # Keep track of the nodes and edges for the trace
-        nodes = {}
-        edges = []
+        nodes: Dict[str, Dict] = {}
+        edges: List[Dict] = []
         
+        def get_entity_meta(entity_id: str) -> Dict:
+            entity = self.model.entities.get(entity_id)
+            if not entity:
+                return {}
+            return {
+                "id": entity_id,
+                "name": entity.name,
+                "type": entity.type.value.lower(),
+                "file_id": entity.metadata.get("file_id", entity.location.repository_path),
+                "qualified_name": entity.qualified_name or entity.name
+            }
+
         def add_node(entity_id: str):
-            if entity_id in nodes: return
-            
-            # Find the entity
-            entity = None
-            entity_type = "unknown"
-            
-            if entity_id in self.model.entities.functions:
-                entity = self.model.entities.functions[entity_id]
-                entity_type = "function"
-            elif entity_id in self.model.entities.classes:
-                entity = self.model.entities.classes[entity_id]
-                entity_type = "class"
-            elif entity_id in self.model.entities.files:
-                entity = self.model.entities.files[entity_id]
-                entity_type = "file"
-            elif entity_id in self.model.entities.modules:
-                entity = self.model.entities.modules[entity_id]
-                entity_type = "module"
-            
-            if entity:
-                nodes[entity_id] = {
-                    "id": entity_id,
-                    "name": getattr(entity, "name", entity_id),
-                    "type": entity_type,
-                    "file_id": getattr(entity, "file_id", entity_id)
-                }
+            if entity_id in nodes or entity_id not in self.model.entities:
+                return
+            meta = get_entity_meta(entity_id)
+            if meta:
+                nodes[entity_id] = meta
 
         for sid in active_ids:
             add_node(sid)
             
-        # Stage 2: Expand using dependencies (depends_on)
-        # Find who depends on our seeds, and what our seeds depend on
-        expanded_deps = set()
+        # Stage 2: Expand using depends_on relationships
+        expanded_deps: Set[str] = set()
         for sid in list(active_ids):
-            # What sid depends on
-            deps = self.model.relationships.depends_on.get(sid, [])
-            for dep in deps:
+            for dep in depends_out.get(sid, []):
                 add_node(dep)
                 edges.append({"source": sid, "target": dep, "type": "depends_on"})
                 expanded_deps.add(dep)
-                
-            # Who depends on sid
-            for entity_id, entity_deps in self.model.relationships.depends_on.items():
-                if sid in entity_deps:
-                    add_node(entity_id)
-                    edges.append({"source": entity_id, "target": sid, "type": "depends_on"})
-                    expanded_deps.add(entity_id)
-                    
+            for caller in depends_in.get(sid, []):
+                add_node(caller)
+                edges.append({"source": caller, "target": sid, "type": "depends_on"})
+                expanded_deps.add(caller)
         active_ids.update(expanded_deps)
         
         # Stage 3: Expand using call graph
-        expanded_calls = set()
+        expanded_calls: Set[str] = set()
         for sid in list(active_ids):
-            calls = self.model.relationships.calls.get(sid, [])
-            for callee in calls:
+            for callee in calls_out.get(sid, []):
                 add_node(callee)
                 edges.append({"source": sid, "target": callee, "type": "calls"})
                 expanded_calls.add(callee)
-                
-            for caller, callees in self.model.relationships.calls.items():
-                if sid in callees:
-                    add_node(caller)
-                    edges.append({"source": caller, "target": sid, "type": "calls"})
-                    expanded_calls.add(caller)
-                    
+            for caller in calls_in.get(sid, []):
+                add_node(caller)
+                edges.append({"source": caller, "target": sid, "type": "calls"})
+                expanded_calls.add(caller)
         active_ids.update(expanded_calls)
         
-        # Stage 4: Use import relationships if they bridge file/module boundaries
-        expanded_imports = set()
+        # Stage 4: Add import edges between active nodes
         for sid in list(active_ids):
-            # The node's file
             if sid in nodes:
                 file_id = nodes[sid].get("file_id")
                 if file_id:
-                    imports = self.model.relationships.imports.get(file_id, [])
-                    for imp in imports:
-                        # Find if any active_id is in the imported file
+                    for imp in imports_out.get(file_id, []):
                         for aid in active_ids:
                             if aid in nodes and nodes[aid].get("file_id") == imp:
                                 edges.append({"source": sid, "target": aid, "type": "imports"})
         
-        # Stage 5: Merge and sequence the path
-        # Simple topological heuristic to order nodes for the linear sequence (Route -> Controller -> etc)
-        # We will categorize nodes into typical layers based on naming
-        
+        # Stage 5: Order nodes into a meaningful flow
         layers = {
-            "route": 1,
+            "route": 1, "router": 1, "api": 1, "endpoint": 1,
             "controller": 2,
-            "service": 3,
-            "manager": 4,
-            "repository": 5,
-            "database": 6,
-            "model": 7,
-            "response": 8
+            "service": 3, "handler": 3,
+            "manager": 4, "processor": 4,
+            "repository": 5, "dao": 5, "store": 5,
+            "db": 6, "database": 6, "sql": 6, "model": 7, "entity": 7, "schema": 7,
+            "response": 8, "serializer": 8, "dto": 8
         }
         
-        def get_layer(name: str, file_id: str) -> int:
-            name_lower = name.lower()
-            file_lower = file_id.lower()
-            combined = name_lower + " " + file_lower
-            
-            if "route" in combined or "api" in combined or "endpoint" in combined:
-                return layers["route"]
-            if "controller" in combined:
-                return layers["controller"]
-            if "service" in combined:
-                return layers["service"]
-            if "manager" in combined:
-                return layers["manager"]
-            if "repository" in combined or "dao" in combined:
-                return layers["repository"]
-            if "db" in combined or "database" in combined or "sql" in combined:
-                return layers["database"]
-            if "model" in combined or "entity" in combined or "schema" in combined:
-                return layers["model"]
-            if "response" in combined:
-                return layers["response"]
-            return 99 # unknown layer
+        def get_layer(node: Dict) -> int:
+            combined = (node.get("name", "") + " " + node.get("file_id", "")).lower()
+            for keyword, layer in sorted(layers.items(), key=lambda x: x[1]):
+                if keyword in combined:
+                    return layer
+            return 99
             
         ordered_nodes = list(nodes.values())
-        ordered_nodes.sort(key=lambda n: get_layer(n["name"], n["file_id"]))
+        ordered_nodes.sort(key=lambda n: get_layer(n))
         
-        # Extract a simplified flow path
-        flow = []
-        for n in ordered_nodes:
-            layer = get_layer(n["name"], n["file_id"])
-            if layer != 99:
-                flow.append(n)
+        # Extract a simplified flow path - prefer nodes with clear layer assignments
+        flow = [n for n in ordered_nodes if get_layer(n) != 99]
         
-        # If the heuristic didn't find clear layers, just return the most connected nodes as the flow
+        # If the heuristic didn't find clear layers, use most-connected nodes
         if not flow and ordered_nodes:
-            # Sort by degree (number of edges)
-            degrees = {nid: 0 for nid in nodes}
+            degrees: Dict[str, int] = {nid: 0 for nid in nodes}
             for e in edges:
                 if e["source"] in degrees: degrees[e["source"]] += 1
                 if e["target"] in degrees: degrees[e["target"]] += 1
-            ordered_nodes.sort(key=lambda n: degrees[n["id"]], reverse=True)
-            flow = ordered_nodes[:6] # Top 6 most important nodes
+            ordered_nodes.sort(key=lambda n: degrees.get(n["id"], 0), reverse=True)
+            flow = ordered_nodes[:10]
+        
+        # If still nothing, just return all seed nodes found
+        if not flow:
+            flow = [get_entity_meta(sid) for sid in list(active_ids)[:10] if sid in self.model.entities]
         
         return {
             "flow": flow,

@@ -7,13 +7,13 @@ participants:
     type: ROUTE
   controller:
     type: CLASS
-    name_pattern: ".*(?i)Controller.*"
+    name_pattern: "(?i).*Controller.*"
   service:
     type: CLASS
-    name_pattern: ".*(?i)Service.*"
+    name_pattern: "(?i).*Service.*"
   repository:
     type: CLASS
-    name_pattern: ".*(?i)Repository.*"
+    name_pattern: "(?i).*Repository.*"
 
 relationships:
   - source: route

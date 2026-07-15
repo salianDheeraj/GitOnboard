@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import json
+from typing import Dict, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
@@ -277,65 +278,90 @@ def scan_repo(repo_name: str, db: Session = Depends(get_db), current_user: User 
         job = db.query(AnalysisJob).filter(AnalysisJob.analysis_id == analysis.id).first()
         job_status = job.status if job else analysis.status
         return {"status": "processing", "job_status": job_status}
-        
-    metrics = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "metrics").first()
-    dependencies = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "dependencies").first()
     
-    metrics_data = metrics.data if metrics else {}
-    dep_data = dependencies.data if dependencies else {"nodes": [], "edges": []}
+    # Derive everything from core_model
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+    except HTTPException:
+        return {"status": "no_model", "overview": {}, "hierarchy": {"name": repo_name, "type": "directory", "children": []}, "files": []}
     
-    # Reconstruct hierarchy from dep_nodes
-    hierarchy = {"name": repo_name, "type": "directory", "children": []}
-    files_metadata = []
+    from backend.intelligence.rim.enums import EntityType
+    from pathlib import Path as PPath
     
+    # Build hierarchy from FILE and DIRECTORY entities
+    files = list(query_layer.get_files())
+    dirs = list(query_layer.get_directories())
+    functions = [e for e in query_layer.model.entities.values() if e.type == EntityType.FUNCTION]
+    classes = [e for e in query_layer.model.entities.values() if e.type == EntityType.CLASS]
+    methods = [e for e in query_layer.model.entities.values() if e.type == EntityType.METHOD]
+    
+    # Build nested hierarchy tree
     dirs_by_path = {}
-    for node in dep_data.get("nodes", []):
-        path = node["full_path"]
-        parts = path.split("/")
+    hierarchy = {"name": repo_name, "type": "directory", "children": [], "path": ""}
+    dirs_by_path[""] = hierarchy
+    
+    # Sort dirs so parents always come before children
+    dir_paths = sorted([d.location.repository_path for d in dirs])
+    for d_path in dir_paths:
+        parts = PPath(d_path).parts
+        name = parts[-1]
+        parent_path = str(PPath(d_path).parent)
+        if parent_path == ".":
+            parent_path = ""
+        d_node = {"name": name, "type": "directory", "path": d_path, "children": []}
+        dirs_by_path[d_path] = d_node
+        parent = dirs_by_path.get(parent_path, hierarchy)
+        parent["children"].append(d_node)
+    
+    # Add files — with their functions and classes as children
+    files_metadata = []
+    for f in files:
+        f_path = f.location.repository_path
+        parts = PPath(f_path).parts
+        name = parts[-1]
+        parent_path = str(PPath(f_path).parent)
+        if parent_path == ".":
+            parent_path = ""
         
-        # Build dir structure
-        curr_path = ""
-        for i in range(len(parts) - 1):
-            parent = curr_path
-            curr_path = f"{curr_path}/{parts[i]}" if curr_path else parts[i]
-            if curr_path not in dirs_by_path:
-                d_node = {"name": parts[i], "type": "directory", "children": []}
-                dirs_by_path[curr_path] = d_node
-                if parent == "":
-                    hierarchy["children"].append(d_node)
-                else:
-                    dirs_by_path[parent]["children"].append(d_node)
-                    
-        # Add file
-        f_node = {"name": node["label"], "type": "file", "path": path}
-        parent = "/".join(parts[:-1])
-        if parent == "":
-            hierarchy["children"].append(f_node)
-        else:
-            dirs_by_path[parent]["children"].append(f_node)
-            
-        files_metadata.append({
-            "path": path,
-            "extension": "." + path.split(".")[-1] if "." in path else "",
-            "language": node.get("language", "Unknown"),
-            "size": 0,
-            "modified_time": ""
-        })
+        # Build file children (classes + top-level functions)
+        file_classes = [c for c in classes if c.metadata.get("file_id") == f_path or c.location.repository_path == f_path]
+        file_fns = [fn for fn in functions if fn.metadata.get("file_id") == f_path or fn.location.repository_path == f_path]
         
-    # Fetch languages from enriched_metadata
-    em_art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "enriched_metadata").first()
-    language_str = "Unknown"
-    if em_art and em_art.data and "repository" in em_art.data and "languages" in em_art.data["repository"]:
-        langs_dict = em_art.data["repository"]["languages"]
-        if langs_dict:
-            sorted_langs = sorted(langs_dict.keys(), key=lambda k: langs_dict[k], reverse=True)[:3]
-            language_str = ", ".join(sorted_langs)
-
+        file_children = []
+        for c in file_classes:
+            cls_methods = [m for m in methods if m.metadata.get("class_id") == c.id]
+            cls_node = {
+                "name": c.name, "type": "class", "path": f_path,
+                "children": [{"name": m.name, "type": "function", "path": f_path, "line": m.location.start_line, "children": []} for m in cls_methods]
+            }
+            file_children.append(cls_node)
+        for fn in file_fns:
+            file_children.append({"name": fn.name, "type": "function", "path": f_path, "line": fn.location.start_line, "children": []})
+        
+        ext = PPath(f_path).suffix
+        lang_map = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript", ".jsx": "JavaScript", ".java": "Java", ".go": "Go", ".rb": "Ruby", ".cpp": "C++", ".c": "C"}
+        lang = lang_map.get(ext.lower(), f.location.language if hasattr(f.location, 'language') else "Unknown")
+        
+        f_node = {"name": name, "type": "file", "path": f_path, "children": file_children}
+        parent = dirs_by_path.get(parent_path, hierarchy)
+        parent["children"].append(f_node)
+        
+        files_metadata.append({"path": f_path, "extension": ext, "language": lang, "size": 0, "modified_time": ""})
+    
+    # Language detection from file extensions
+    lang_counts: Dict[str, int] = {}
+    for fm in files_metadata:
+        if fm["language"] != "Unknown":
+            lang_counts[fm["language"]] = lang_counts.get(fm["language"], 0) + 1
+    language_str = ", ".join(sorted(lang_counts.keys(), key=lambda k: lang_counts[k], reverse=True)[:3]) if lang_counts else "Unknown"
+    
     return {
+        "status": "completed",
         "overview": {
-            "total_files": metrics_data.get("total_files", 0),
-            "total_python_files": metrics_data.get("python_files", 0),
-            "total_directories": metrics_data.get("total_directories", 0),
+            "total_files": len(files),
+            "total_directories": len(dirs),
+            "total_functions": len(functions),
+            "total_classes": len(classes),
             "language": language_str
         },
         "hierarchy": hierarchy,
@@ -362,27 +388,106 @@ async def parse_repo_file(repo_name: str, file_path: str, db: Session = Depends(
 
 @repo_router.get("/{repo_name}/dependencies")
 def get_dependencies(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    repo, analysis = _get_latest_analysis(repo_name, db, current_user)
-    art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "dependencies").first()
-    return art.data if art else {"nodes": [], "edges": []}
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import EntityType, RelationshipType
+        # Build nodes from FILE entities
+        nodes = []
+        seen_nodes = set()
+        for e in query_layer.model.entities.values():
+            if e.type == EntityType.FILE and e.id not in seen_nodes:
+                seen_nodes.add(e.id)
+                nodes.append({"id": e.id, "label": e.name, "full_path": e.location.repository_path, "language": e.location.language})
+        # Build edges from IMPORTS/DEPENDS_ON relationships
+        edges = []
+        for r in query_layer.model.relationships.values():
+            if r.type in (RelationshipType.IMPORTS, RelationshipType.DEPENDS_ON):
+                edges.append({"source": r.source_id, "target": r.target_id, "type": r.type.value})
+        return {"nodes": nodes, "edges": edges}
+    except HTTPException:
+        return {"nodes": [], "edges": []}
 
 @repo_router.get("/{repo_name}/call-graph")
 def get_call_graph(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    repo, analysis = _get_latest_analysis(repo_name, db, current_user)
-    art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "call_graph").first()
-    return art.data if art else {"nodes": [], "edges": []}
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import EntityType, RelationshipType
+        nodes = []
+        edges = []
+        seen_nodes = set()
+        for r in query_layer.model.relationships.values():
+            if r.type == RelationshipType.CALLS:
+                edges.append({"source": r.source_id, "target": r.target_id})
+                for nid in (r.source_id, r.target_id):
+                    if nid not in seen_nodes:
+                        seen_nodes.add(nid)
+                        entity = query_layer.model.entities.get(nid)
+                        label = entity.name if entity else nid.split("::")[-1]
+                        nodes.append({"id": nid, "label": label})
+        return {"nodes": nodes, "edges": edges}
+    except HTTPException:
+        return {"nodes": [], "edges": []}
 
 @repo_router.get("/{repo_name}/symbols")
 def get_symbols(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    repo, analysis = _get_latest_analysis(repo_name, db, current_user)
-    art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "symbols").first()
-    return {"symbols": art.data if art else []}
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import EntityType
+        symbols = []
+        for e in query_layer.model.entities.values():
+            if e.type in (EntityType.CLASS, EntityType.FUNCTION, EntityType.METHOD):
+                symbols.append({
+                    "id": e.id,
+                    "name": e.name,
+                    "qualified_name": e.qualified_name or e.name,
+                    "type": e.type.value,
+                    "file_path": e.metadata.get("file_id", e.location.repository_path),
+                    "line_number": e.location.start_line
+                })
+        return {"symbols": symbols}
+    except HTTPException:
+        return {"symbols": []}
 
 @repo_router.get("/{repo_name}/stats")
 def get_stats(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    repo, analysis = _get_latest_analysis(repo_name, db, current_user)
-    art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "metrics").first()
-    return art.data if art else {}
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import EntityType
+        entities = query_layer.model.entities
+        files = [e for e in entities.values() if e.type == EntityType.FILE]
+        functions = [e for e in entities.values() if e.type == EntityType.FUNCTION]
+        classes = [e for e in entities.values() if e.type == EntityType.CLASS]
+        methods = [e for e in entities.values() if e.type == EntityType.METHOD]
+        dirs = [e for e in entities.values() if e.type == EntityType.DIRECTORY]
+        
+        # Estimate lines of code from location data
+        total_lines = sum(e.location.end_line - e.location.start_line + 1 for e in files if e.location)
+        
+        # Language counts
+        from pathlib import Path as PPath
+        lang_counts: Dict[str, int] = {}
+        ext_map = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript", ".jsx": "JavaScript", ".java": "Java", ".go": "Go"}
+        for f in files:
+            ext = PPath(f.location.repository_path).suffix.lower()
+            lang = ext_map.get(ext, "Other")
+            lang_counts[lang] = lang_counts.get(lang, 0) + 1
+        
+        return {
+            "total_files": len(files),
+            "total_directories": len(dirs),
+            "total_functions": len(functions),
+            "total_classes": len(classes),
+            "total_methods": len(methods),
+            "lines_of_code": total_lines,
+            "language_distribution": lang_counts,
+            "average_functions_per_module": round(len(functions) / max(len(files), 1), 2),
+            "custom_metrics": {
+                "test_coverage_approx_percent": "N/A",
+                "documentation_coverage_percent": 0
+            }
+        }
+    except HTTPException:
+        return {}
 
 @repo_router.get("/{repo_name}/health/findings")
 def get_health_findings(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -464,13 +569,13 @@ def get_or_build_model(repo_name: str, db: Session, current_user: User):
     art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "core_model").first()
     if not art or not art.blob_data:
         raise HTTPException(status_code=404, detail="Model artifact not found")
-    import pickle
     try:
-        model = pickle.loads(art.blob_data)
+        from backend.intelligence.rim.serialization import deserialize_rim
+        model = deserialize_rim(art.blob_data.decode("utf-8"))
         from backend.intelligence import QueryLayer
         return QueryLayer(model)
     except Exception as e:
-        logger.error(f"Failed to unpickle model: {e}")
+        logger.error(f"Failed to load model from json: {e}")
         raise HTTPException(status_code=500, detail="Failed to parse model")
 
 def get_task_status(repo_name: str, task_name: str, current_user: User, db: Session = None):
@@ -511,34 +616,44 @@ def set_task_status(repo_name: str, task_name: str, status: str, current_user: U
 @repo_router.get("/{repo_name}/architecture")
 def get_architecture(repo_name: str, node_id: str = "root", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     query_layer = get_or_build_model(repo_name, db, current_user)
+    from backend.intelligence.rim.enums import EntityType
     nodes = []
     
     if node_id == "root":
         for d in query_layer.get_directories():
-            if str(Path(d.path).parent).replace("\\", "/") == ".":
-                nodes.append({"id": d.path, "name": d.name, "type": "folder", "parent": "root", "has_children": True, "path": d.path})
+            path = d.location.repository_path
+            parent = str(Path(path).parent).replace("\\", "/")
+            if parent in (".", ""):
+                nodes.append({"id": path, "name": d.name, "type": "folder", "parent": "root", "has_children": True, "path": path})
         for f in query_layer.get_files():
-            if str(Path(f.path).parent).replace("\\", "/") == ".":
-                nodes.append({"id": f.path, "name": f.name, "type": "file", "parent": "root", "has_children": f.is_python, "path": f.path})
+            path = f.location.repository_path
+            parent = str(Path(path).parent).replace("\\", "/")
+            if parent in (".", ""):
+                has_children = f.metadata.get("is_supported", False)
+                nodes.append({"id": path, "name": f.name, "type": "file", "parent": "root", "has_children": has_children, "path": path})
     elif "::" not in node_id:
         for d in query_layer.get_directories():
-            if str(Path(d.path).parent).replace("\\", "/") == node_id:
-                nodes.append({"id": d.path, "name": d.name, "type": "folder", "parent": node_id, "has_children": True, "path": d.path})
+            path = d.location.repository_path
+            parent = str(Path(path).parent).replace("\\", "/")
+            if parent == node_id:
+                nodes.append({"id": path, "name": d.name, "type": "folder", "parent": node_id, "has_children": True, "path": path})
         for f in query_layer.get_files():
-            if str(Path(f.path).parent).replace("\\", "/") == node_id:
-                nodes.append({"id": f.path, "name": f.name, "type": "file", "parent": node_id, "has_children": f.is_python, "path": f.path})
+            path = f.location.repository_path
+            parent = str(Path(path).parent).replace("\\", "/")
+            if parent == node_id:
+                has_children = f.metadata.get("is_supported", False)
+                nodes.append({"id": path, "name": f.name, "type": "file", "parent": node_id, "has_children": has_children, "path": path})
         
-        file_node = query_layer.get_file(node_id)
-        if file_node and file_node.is_python:
-            for c in query_layer.get_classes_in_file(node_id):
-                nodes.append({"id": c.id, "name": c.name, "type": "class", "parent": node_id, "has_children": True, "path": node_id})
-            for fn in [fn for fn in query_layer.model.entities.functions.values() if fn.file_id == node_id]:
-                nodes.append({"id": fn.id, "name": fn.name, "type": "function", "parent": node_id, "has_children": False, "path": node_id})
+        # File children: classes and functions
+        for c in query_layer.get_classes_in_file(node_id):
+            nodes.append({"id": c.id, "name": c.name, "type": "class", "parent": node_id, "has_children": True, "path": node_id})
+        for fn in [e for e in query_layer.model.entities.values() if e.type == EntityType.FUNCTION and (e.metadata.get("file_id") == node_id or e.location.repository_path == node_id)]:
+            nodes.append({"id": fn.id, "name": fn.name, "type": "function", "parent": node_id, "has_children": False, "path": node_id})
     else:
-        # It's a class
-        methods = [m for m in query_layer.model.entities.methods.values() if m.class_id == node_id]
+        # It's a class — return methods
+        methods = [e for e in query_layer.model.entities.values() if e.type == EntityType.METHOD and e.metadata.get("class_id") == node_id]
         for m in methods:
-            nodes.append({"id": m.id, "name": m.name, "type": "function", "parent": node_id, "has_children": False, "path": m.file_id})
+            nodes.append({"id": m.id, "name": m.name, "type": "function", "parent": node_id, "has_children": False, "path": m.metadata.get("file_id")})
             
     return {"nodes": nodes}
 
@@ -615,12 +730,13 @@ def search_symbols(repo_name: str, q: str, db: Session = Depends(get_db), curren
     query_layer = get_or_build_model(repo_name, db, current_user)
     q_lower = q.lower()
     results = []
-    for c in query_layer.model.entities.classes.values():
-        if q_lower in c.name.lower():
-            results.append({"id": c.id, "type": "Class", "name": c.name, "file_path": c.file_id, "line_number": c.line_number})
-    for f in query_layer.model.entities.functions.values():
-        if q_lower in f.name.lower():
-            results.append({"id": f.id, "type": "Function", "name": f.name, "file_path": f.file_id, "line_number": f.line_number})
+    from backend.intelligence.rim.enums import EntityType
+    for e in query_layer.model.entities.values():
+        if q_lower in e.name.lower():
+            if e.type == EntityType.CLASS:
+                results.append({"id": e.id, "type": "Class", "name": e.name, "file_path": e.metadata.get("file_id", e.location.repository_path), "line_number": e.location.start_line})
+            elif e.type == EntityType.FUNCTION:
+                results.append({"id": e.id, "type": "Function", "name": e.name, "file_path": e.metadata.get("file_id", e.location.repository_path), "line_number": e.location.start_line})
     return {"results": results}
     
 
@@ -754,10 +870,13 @@ def semantic_index_repo(repo_name: str, background_tasks: BackgroundTasks, db: S
             collection = client.get_or_create_collection(name="semantic_index")
             current_files = {}
             for f in query_layer.get_files():
-                if f.is_python:
+                from backend.intelligence.rim.enums import EntityType
+                is_supported = f.metadata.get("is_supported", False) or f.type == EntityType.FILE
+                if is_supported:
+                    path = f.location.repository_path
                     try:
-                        mtime = (target_dir / f.path).stat().st_mtime
-                        current_files[f.path] = mtime
+                        mtime = (target_dir / path).stat().st_mtime
+                        current_files[path] = mtime
                     except Exception:
                         pass
             deleted_files = set(state.keys()) - set(current_files.keys())
@@ -946,58 +1065,79 @@ def graph_query(repo_name: str, req: GraphQueryRequest, db: Session = Depends(ge
 
 @repo_router.get("/{repo_name}/health/layers")
 def get_health_layers(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    query_layer = get_or_build_model(repo_name, db, current_user)
-    architecture = getattr(query_layer.model.analyses, "architecture", {})
-    layers = [{"module_id": k, "layer": _serialize_dataclass(v)} for k, v in architecture.items()]
-    return {"layers": layers}
+    # Derive layers from entity types: group files/dirs by top-level directory
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import EntityType
+        layer_map: Dict[str, List[str]] = {}
+        for e in query_layer.model.entities.values():
+            if e.type == EntityType.FILE:
+                parts = Path(e.location.repository_path).parts
+                layer = parts[0] if len(parts) > 1 else "root"
+                layer_map.setdefault(layer, []).append(e.location.repository_path)
+        layers = [{"module_id": k, "files": v, "file_count": len(v)} for k, v in layer_map.items()]
+        return {"layers": layers}
+    except HTTPException:
+        return {"layers": []}
 
 
 @repo_router.get("/{repo_name}/health/dependencies")
 def get_health_dependencies(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    query_layer = get_or_build_model(repo_name, db, current_user)
-    dep_graph = getattr(query_layer.model.analyses, "dependency_graph", None)
-    if not dep_graph:
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import RelationshipType
+        edges = [
+            {"source": r.source_id, "target": r.target_id, "type": r.type.value}
+            for r in query_layer.model.relationships.values()
+            if r.type == RelationshipType.DEPENDS_ON or r.type == RelationshipType.IMPORTS
+        ]
+        return {"edges": edges}
+    except HTTPException:
         return {"edges": []}
-    
-    edges = getattr(dep_graph, "edges", None) or []
-    return {"edges": _serialize_dataclass(edges)}
 
 
 @repo_router.get("/{repo_name}/health/dead-code")
 def get_health_dead_code(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    query_layer = get_or_build_model(repo_name, db, current_user)
-    findings = getattr(query_layer.model.analyses, "findings", None) or []
-    dead_code = [f for f in findings if "Unused" in f.title or "Unreachable" in f.title]
-    return {"findings": _serialize_dataclass(dead_code)}
+    # Heuristic: entities with no incoming relationships
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import EntityType
+        referenced_ids = {r.target_id for r in query_layer.model.relationships.values()}
+        dead = [
+            {"id": e.id, "name": e.name, "type": e.type.value, "file": e.location.repository_path}
+            for e in query_layer.model.entities.values()
+            if e.type in (EntityType.FUNCTION, EntityType.METHOD)
+            and e.id not in referenced_ids
+        ]
+        return {"findings": dead[:50]}
+    except HTTPException:
+        return {"findings": []}
 
 
 @repo_router.get("/{repo_name}/health/smells")
 def get_health_smells(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    query_layer = get_or_build_model(repo_name, db, current_user)
-    cycles = getattr(query_layer.model.analyses, "cycles", None) or []
-    findings = getattr(query_layer.model.analyses, "findings", None) or []
+    # Derive smells from findings artifact (stored during analysis) and model patterns
+    try:
+        repo, analysis = _get_latest_analysis(repo_name, db, current_user)
+    except HTTPException:
+        return {"smells": []}
+    
+    findings_art = db.query(AnalysisArtifact).filter(
+        AnalysisArtifact.analysis_id == analysis.id,
+        AnalysisArtifact.type == "findings"
+    ).first()
+    findings = findings_art.data if findings_art else []
     
     smells = []
-    # Add cycles as smells
-    for c in cycles:
-        smells.append({
-            "type": "Cycle",
-            "severity": _serialize_dataclass(c.severity),
-            "description": c.description,
-            "members": c.members
-        })
-        
-    # Add high severity findings as smells
-    from analysis.models.severity import Severity
     for f in findings:
-        if f.severity in (Severity.ERROR, Severity.CRITICAL):
+        severity = f.get("severity", "").upper() if isinstance(f, dict) else ""
+        if severity in ("ERROR", "CRITICAL", "WARNING"):
             smells.append({
-                "type": "Finding",
-                "severity": _serialize_dataclass(f.severity),
-                "description": f.description,
-                "file_path": f.file_path
+                "type": f.get("type", "Finding") if isinstance(f, dict) else "Finding",
+                "severity": severity,
+                "description": f.get("description", "") if isinstance(f, dict) else str(f),
+                "file_path": f.get("file_path", "") if isinstance(f, dict) else ""
             })
-            
     return {"smells": smells}
 
 
@@ -1018,21 +1158,17 @@ def trace_feature(repo_name: str, q: str, db: Session = Depends(get_db), current
                 logger.error(f"Failed to build model for trace: {e}")
                 return {"trace": None}
                 
+            from backend.intelligence.rim.enums import EntityType
             for item in query_results["metadatas"][0]:
                 fp = item.get("file_path")
                 name = item.get("name")
                 typ = item.get("type")
                 ent_id = None
                 
-                if typ == "function":
-                    for f in query_layer.model.entities.functions.values():
-                        if getattr(f, "file_id", "") == fp and getattr(f, "name", "") == name:
-                            ent_id = getattr(f, "id", None)
-                            break
-                elif typ == "class":
-                    for c in query_layer.model.entities.classes.values():
-                        if getattr(c, "file_id", "") == fp and getattr(c, "name", "") == name:
-                            ent_id = getattr(c, "id", None)
+                for e in query_layer.model.entities.values():
+                    if e.name == name and e.metadata.get("file_id") == fp:
+                        if (typ == "function" and e.type == EntityType.FUNCTION) or (typ == "class" and e.type == EntityType.CLASS):
+                            ent_id = e.id
                             break
                             
                 if ent_id:

@@ -1,6 +1,6 @@
 from typing import List, Dict
-from ...rim.repository import RepositoryModel
-from ...capabilities.model import CapabilityCategory
+from ..rim.repository import RepositoryModel
+from ..capabilities.model import CapabilityCategory
 
 class NamingEngine:
     """

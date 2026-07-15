@@ -69,11 +69,10 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
   const status = healthData?.status || "Analyzing";
   
   const filesCount = overview.total_files || statsData?.total_files || 0;
-  const funcsCount = statsData?.total_functions || 0;
-  const classesCount = statsData?.total_classes || 0;
+  const funcsCount = overview.total_functions || statsData?.total_functions || 0;
+  const classesCount = overview.total_classes || statsData?.total_classes || 0;
   
   const loc = statsData?.lines_of_code || 0;
-  // Fallbacks if not computed yet
   const complexity = statsData?.average_functions_per_module ? statsData.average_functions_per_module.toFixed(1) : "0";
   const testCov = statsData?.custom_metrics?.test_coverage_approx_percent || "0%";
   const commentRatio = statsData?.custom_metrics?.documentation_coverage_percent ? `${statsData.custom_metrics.documentation_coverage_percent.toFixed(1)}%` : "0%";

@@ -4,6 +4,8 @@ from pathlib import Path
 
 from .providers.base import ParsedFile, LanguageProvider
 from .providers.python import PythonProvider
+from .providers.typescript import TypeScriptProvider, JavaScriptProvider
+from .providers.java import JavaProvider
 from ..scanner.manifest import RepositoryManifest
 
 class ASTParserManager:
@@ -14,7 +16,10 @@ class ASTParserManager:
         self.target_dir = Path(target_dir).resolve()
         
         self.providers: Dict[str, LanguageProvider] = {
-            "Python": PythonProvider()
+            "Python": PythonProvider(),
+            "TypeScript": TypeScriptProvider(),
+            "JavaScript": JavaScriptProvider(),
+            "Java": JavaProvider(),
         }
         
         # Cache keyed by relative file path

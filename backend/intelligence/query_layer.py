@@ -1,5 +1,7 @@
 from typing import List, Dict, Optional, Any
-from .repository_model import RepositoryModel, FunctionNode, ClassNode, FileNode, DirectoryNode, MethodNode
+from .rim.repository import RepositoryModel
+from .rim.entity import Entity
+from .rim.enums import EntityType
 
 class QueryLayer:
     """Unified interface for accessing the RepositoryModel using Entity Indexes."""
@@ -11,70 +13,70 @@ class QueryLayer:
     def _build_indexes(self):
         # Function Name -> List of Function IDs
         self._func_name_idx: Dict[str, List[str]] = {}
-        for fn_id, fn in self.model.entities.functions.items():
-            self._func_name_idx.setdefault(fn.name, []).append(fn_id)
-
         # Class Name -> List of Class IDs
         self._class_name_idx: Dict[str, List[str]] = {}
-        for cls_id, cls in self.model.entities.classes.items():
-            self._class_name_idx.setdefault(cls.name, []).append(cls_id)
-
         # File -> Classes
         self._file_to_classes_idx: Dict[str, List[str]] = {}
-        for cls_id, cls in self.model.entities.classes.items():
-            self._file_to_classes_idx.setdefault(cls.file_id, []).append(cls_id)
-
         # Module -> Functions
         self._module_to_functions_idx: Dict[str, List[str]] = {}
-        for fn_id, fn in self.model.entities.functions.items():
-            self._module_to_functions_idx.setdefault(fn.module_id, []).append(fn_id)
 
-    def find_function(self, name: str) -> List[FunctionNode]:
+        for eid, entity in self.model.entities.items():
+            if entity.type == EntityType.FUNCTION:
+                self._func_name_idx.setdefault(entity.name, []).append(eid)
+                # metadata might store module_id, or we can use location.repository_path
+                module_id = entity.metadata.get("module_id", entity.location.repository_path)
+                self._module_to_functions_idx.setdefault(module_id, []).append(eid)
+            elif entity.type == EntityType.CLASS:
+                self._class_name_idx.setdefault(entity.name, []).append(eid)
+                # file_id could be location.repository_path
+                file_id = entity.metadata.get("file_id", entity.location.repository_path)
+                self._file_to_classes_idx.setdefault(file_id, []).append(eid)
+
+    def find_function(self, name: str) -> List[Entity]:
         ids = self._func_name_idx.get(name, [])
-        return [self.model.entities.functions[fn_id] for fn_id in ids if fn_id in self.model.entities.functions]
+        return [self.model.entities[eid] for eid in ids if eid in self.model.entities]
 
-    def get_class(self, name: str) -> List[ClassNode]:
+    def get_class(self, name: str) -> List[Entity]:
         ids = self._class_name_idx.get(name, [])
-        return [self.model.entities.classes[cls_id] for cls_id in ids if cls_id in self.model.entities.classes]
+        return [self.model.entities[eid] for eid in ids if eid in self.model.entities]
 
-    def get_file(self, file_id: str) -> Optional[FileNode]:
-        return self.model.entities.files.get(file_id)
+    def get_file(self, file_id: str) -> Optional[Entity]:
+        return self.model.entities.get(file_id)
 
     def get_dependencies(self, file_id: str) -> List[str]:
-        return self.model.relationships.depends_on.get(file_id, [])
+        # Filter relationships where type = DEPENDS_ON and source_id = file_id
+        return [r.target_id for r in self.model.relationships.values() if r.type == "DEPENDS_ON" and r.source_id == file_id]
 
     def get_calls(self, function_id: str) -> List[str]:
-        return self.model.relationships.calls.get(function_id, [])
+        return [r.target_id for r in self.model.relationships.values() if r.type == "CALLS" and r.source_id == function_id]
 
-    def get_classes_in_file(self, file_id: str) -> List[ClassNode]:
+    def get_classes_in_file(self, file_id: str) -> List[Entity]:
         ids = self._file_to_classes_idx.get(file_id, [])
-        return [self.model.entities.classes[cls_id] for cls_id in ids if cls_id in self.model.entities.classes]
+        return [self.model.entities[eid] for eid in ids if eid in self.model.entities]
 
-    def get_functions_in_module(self, module_id: str) -> List[FunctionNode]:
+    def get_functions_in_module(self, module_id: str) -> List[Entity]:
         ids = self._module_to_functions_idx.get(module_id, [])
-        return [self.model.entities.functions[fn_id] for fn_id in ids if fn_id in self.model.entities.functions]
+        return [self.model.entities[eid] for eid in ids if eid in self.model.entities]
 
-    # Useful for architecture
-    def get_directories(self) -> List[DirectoryNode]:
-        return list(self.model.entities.directories.values())
+    def get_directories(self) -> List[Entity]:
+        return [e for e in self.model.entities.values() if e.type == EntityType.DIRECTORY]
 
-    def get_files(self) -> List[FileNode]:
-        return list(self.model.entities.files.values())
+    def get_files(self) -> List[Entity]:
+        return [e for e in self.model.entities.values() if e.type == EntityType.FILE]
 
     def search_entities(self, query: str) -> List[Dict[str, Any]]:
         query_lower = query.lower()
         results = []
-        # basic search over functions and classes
         for fn_name, fn_ids in self._func_name_idx.items():
             if query_lower in fn_name.lower():
-                for fn_id in fn_ids:
-                    fn = self.model.entities.functions[fn_id]
-                    results.append({"type": "function", "name": fn.name, "id": fn_id, "file": fn.file_id})
+                for eid in fn_ids:
+                    fn = self.model.entities[eid]
+                    results.append({"type": "function", "name": fn.name, "id": eid, "file": fn.location.repository_path})
         
         for cls_name, cls_ids in self._class_name_idx.items():
             if query_lower in cls_name.lower():
-                for cls_id in cls_ids:
-                    cls = self.model.entities.classes[cls_id]
-                    results.append({"type": "class", "name": cls.name, "id": cls_id, "file": cls.file_id})
+                for eid in cls_ids:
+                    cls = self.model.entities[eid]
+                    results.append({"type": "class", "name": cls.name, "id": eid, "file": cls.location.repository_path})
                     
         return results
