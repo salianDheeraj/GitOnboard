@@ -212,12 +212,24 @@ def list_repos(db: Session = Depends(get_db), current_user: User = Depends(get_c
         parts = r.url.rstrip("/").split("/")
         repo_name = parts[-1]
         
+        # Fetch languages from enriched_metadata if available
+        language_str = "Unknown"
+        if latest:
+            em_art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == latest.id, AnalysisArtifact.type == "enriched_metadata").first()
+            if em_art and em_art.data and "repository" in em_art.data and "languages" in em_art.data["repository"]:
+                langs_dict = em_art.data["repository"]["languages"]
+                if langs_dict:
+                    # Sort languages by count descending and take top 3
+                    sorted_langs = sorted(langs_dict.keys(), key=lambda k: langs_dict[k], reverse=True)[:3]
+                    language_str = ", ".join(sorted_langs)
+
         results.append({
             "id": r.id,
             "project_name": repo_name,
             "url": r.url,
             "status": status,
-            "import_time": latest.created_at.isoformat() if latest else None
+            "import_time": latest.created_at.isoformat() if latest else None,
+            "language": language_str
         })
     return {"repositories": results}
 
@@ -310,12 +322,21 @@ def scan_repo(repo_name: str, db: Session = Depends(get_db), current_user: User 
             "modified_time": ""
         })
         
+    # Fetch languages from enriched_metadata
+    em_art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "enriched_metadata").first()
+    language_str = "Unknown"
+    if em_art and em_art.data and "repository" in em_art.data and "languages" in em_art.data["repository"]:
+        langs_dict = em_art.data["repository"]["languages"]
+        if langs_dict:
+            sorted_langs = sorted(langs_dict.keys(), key=lambda k: langs_dict[k], reverse=True)[:3]
+            language_str = ", ".join(sorted_langs)
+
     return {
         "overview": {
             "total_files": metrics_data.get("total_files", 0),
             "total_python_files": metrics_data.get("python_files", 0),
             "total_directories": metrics_data.get("total_directories", 0),
-            "language": "Unknown"
+            "language": language_str
         },
         "hierarchy": hierarchy,
         "files": files_metadata
@@ -382,7 +403,6 @@ def get_health_scores(repo_name: str, db: Session = Depends(get_db), current_use
     findings_art = db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "findings").first()
     findings = findings_art.data if findings_art else []
     
-    base_score = 100.0
     deduction = 0.0
     
     for f in findings:
@@ -394,7 +414,11 @@ def get_health_scores(repo_name: str, db: Session = Depends(get_db), current_use
         else:
             deduction += 0.5
             
-    final_score = max(0.0, base_score - deduction)
+    m_score = max(0.0, 100.0 - deduction * 0.4)
+    r_score = max(0.0, 100.0 - deduction * 0.3)
+    s_score = max(0.0, 100.0 - deduction * 0.3)
+    
+    final_score = (m_score * 0.4) + (r_score * 0.3) + (s_score * 0.3)
     
     if final_score > 90:
         status = "Excellent"
@@ -410,17 +434,17 @@ def get_health_scores(repo_name: str, db: Session = Depends(get_db), current_use
         "status": status,
         "categories": {
             "maintainability": {
-                "score": max(0, 100 - deduction * 0.4),
+                "score": m_score,
                 "weight": 0.4,
                 "explanation": "Code maintainability based on complexity and structure."
             },
             "reliability": {
-                "score": max(0, 100 - deduction * 0.3),
+                "score": r_score,
                 "weight": 0.3,
                 "explanation": "Likelihood of bugs and runtime issues."
             },
             "security": {
-                "score": max(0, 100 - deduction * 0.3),
+                "score": s_score,
                 "weight": 0.3,
                 "explanation": "Security vulnerabilities and safe coding practices."
             }

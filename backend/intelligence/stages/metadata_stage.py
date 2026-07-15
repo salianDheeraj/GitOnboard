@@ -151,18 +151,26 @@ class RepositoryMetadataStage:
         ext_map = {
             ".py": "Python",
             ".js": "JavaScript",
-            ".jsx": "JavaScript (React)",
+            ".jsx": "JavaScript",
             ".ts": "TypeScript",
-            ".tsx": "TypeScript (React)",
+            ".tsx": "TypeScript",
+            ".java": "Java",
+            ".c": "C",
+            ".cpp": "C++",
+            ".cs": "C#",
+            ".go": "Go",
+            ".rs": "Rust",
+            ".rb": "Ruby",
+            ".php": "PHP",
+            ".swift": "Swift",
+            ".kt": "Kotlin",
             ".html": "HTML",
-            ".css": "CSS",
-            ".md": "Markdown",
-            ".json": "JSON"
+            ".css": "CSS"
         }
         
         counts = {}
         for f in model.entities.files.values():
-            lang = ext_map.get(f.extension.lower(), f.extension.lower().strip("."))
+            lang = ext_map.get(f.extension.lower())
             if lang:
                 counts[lang] = counts.get(lang, 0) + 1
         

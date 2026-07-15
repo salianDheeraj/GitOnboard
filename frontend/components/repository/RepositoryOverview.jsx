@@ -25,7 +25,8 @@ import {
 } from 'lucide-react';
 
 const getLanguageConfig = (lang) => {
-  switch (lang) {
+  const primaryLang = lang ? lang.split(',')[0].trim() : '';
+  switch (primaryLang) {
     case 'Python': return { bg: 'bg-blue-500', Icon: PythonIcon };
     case 'JavaScript': return { bg: 'bg-yellow-500', Icon: JavascriptIcon };
     case 'TypeScript': return { bg: 'bg-blue-600', Icon: TypescriptIcon };

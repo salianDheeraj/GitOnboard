@@ -150,8 +150,8 @@ class AnalysisWorker(WorkerInterface):
                         ".py": "Python", 
                         ".js": "JavaScript", 
                         ".ts": "TypeScript", 
-                        ".jsx": "React", 
-                        ".tsx": "React", 
+                        ".jsx": "JavaScript", 
+                        ".tsx": "TypeScript", 
                         ".java": "Java"
                     }
                     dep_nodes = []

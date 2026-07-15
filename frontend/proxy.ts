@@ -7,7 +7,7 @@ const protectedPaths = [
   '/repository'
 ];
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   
   // Check if the current path starts with any of the protected paths

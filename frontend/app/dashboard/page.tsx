@@ -121,7 +121,7 @@ export default function Dashboard() {
               <Card className="h-full hover:shadow-md transition-shadow cursor-pointer group flex flex-col">
                 <div className="flex justify-between items-start mb-4">
                   <h3 className="font-bold text-lg text-blue-600 group-hover:text-blue-700 transition-colors line-clamp-1">{repo.project_name}</h3>
-                  <Badge variant="neutral">Python</Badge>
+                  <Badge variant="neutral">{repo.language || "Unknown"}</Badge>
                 </div>
                 
                 <div className="space-y-4 flex-grow">
