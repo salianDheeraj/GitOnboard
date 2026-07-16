@@ -70,7 +70,7 @@ export function Header() {
             </Button>
           </>
         ) : (
-          <Button variant="primary" size="sm" onClick={() => window.location.href = "http://localhost:8000/api/auth/github/login"}>
+          <Button variant="primary" size="sm" onClick={() => window.location.href = "/api/auth/github/login"}>
             Log In
           </Button>
         )}

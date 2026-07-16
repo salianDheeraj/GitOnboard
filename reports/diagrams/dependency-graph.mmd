@@ -1,0 +1,113 @@
+graph LR
+    subgraph "Entry Points"
+        MAIN["backend/main.py"]
+    end
+
+    subgraph "Routers"
+        AUTH_R["routers/auth.py"]
+        HEALTH_R["routers/health.py"]
+        REPO_R["routers/repo.py\n⚠️ 1210 lines / god module"]
+    end
+
+    subgraph "Dependencies"
+        AUTH_DEP["dependencies/auth.py\nget_current_user()"]
+    end
+
+    subgraph "Core Services"
+        DB["database.py"]
+        CONFIG["config.py"]
+        TM["task_manager.py"]
+        LLM["llm_service.py"]
+        LOGGER["logger.py"]
+    end
+
+    subgraph "Background Services"
+        QUEUE["services/queue.py"]
+        WORKER["services/worker.py"]
+        GH["services/github.py"]
+        GH_OAUTH["services/github_oauth.py"]
+    end
+
+    subgraph "Intelligence (Active)"
+        QL["intelligence/query_layer.py"]
+        FT["intelligence/feature_tracing.py"]
+        PIPELINE["engine/orchestration/pipeline.py"]
+        ANALYZERS["engine/analyzers/__init__.py"]
+        SCANNER["engine/scanner/scanner.py"]
+        PARSER["engine/parser/manager.py"]
+        PATTERNS["intelligence/patterns/engine.py"]
+        CAPS["intelligence/capabilities/engine.py"]
+        FEATS["intelligence/features/engine.py"]
+        RIM["intelligence/rim/repository.py"]
+        SER["intelligence/rim/serialization.py"]
+        GQS["intelligence/graphs/graph_query_service.py"]
+    end
+
+    subgraph "Dead Code ⚠️"
+        OLD_PIPE["intelligence/pipeline.py\n❌ DEAD"]
+        OLD_PARSE["intelligence/parser.py\n❌ DEAD"]
+        ORCH["intelligence/orchestrator/**\n❌ DEAD"]
+        VIZ["intelligence/visualization/**\n❌ DEAD"]
+        SRC["src/analysis/**\n❌ DEAD"]
+    end
+
+    subgraph "Data Models"
+        M_USER["models/user.py"]
+        M_REPO["models/repository.py"]
+    end
+
+    MAIN --> AUTH_R
+    MAIN --> HEALTH_R
+    MAIN --> REPO_R
+    MAIN --> QUEUE
+    MAIN --> TM
+    MAIN --> DB
+    MAIN --> LOGGER
+
+    AUTH_R --> GH_OAUTH
+    AUTH_R --> DB
+    AUTH_R --> M_USER
+    AUTH_R --> AUTH_DEP
+    AUTH_R --> CONFIG
+
+    HEALTH_R --> DB
+
+    REPO_R --> AUTH_DEP
+    REPO_R --> DB
+    REPO_R --> TM
+    REPO_R --> LLM
+    REPO_R --> GH
+    REPO_R --> QL
+    REPO_R --> FT
+    REPO_R --> SER
+    REPO_R --> GQS
+    REPO_R --> M_REPO
+
+    AUTH_DEP --> DB
+    AUTH_DEP --> CONFIG
+    AUTH_DEP --> M_USER
+
+    QUEUE --> WORKER
+    WORKER --> GH
+    WORKER --> PIPELINE
+    WORKER --> PATTERNS
+    WORKER --> CAPS
+    WORKER --> FEATS
+    WORKER --> SER
+    WORKER --> DB
+
+    PIPELINE --> SCANNER
+    PIPELINE --> PARSER
+    PIPELINE --> ANALYZERS
+    ANALYZERS --> RIM
+    PATTERNS --> RIM
+    CAPS --> RIM
+    FEATS --> RIM
+
+    QL --> RIM
+    FT --> RIM
+    GQS --> RIM
+
+    DB --> CONFIG
+    M_USER --> DB
+    M_REPO --> DB

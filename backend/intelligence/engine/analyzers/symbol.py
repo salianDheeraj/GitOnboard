@@ -25,7 +25,7 @@ class PythonSymbolVisitor(ast.NodeVisitor):
         self.source_lines = source.splitlines()
         self.entities: List[Entity] = []
         self.relationships: List[Relationship] = []
-        self.namespace_stack: List[str] = []
+        self.namespace_stack: List[tuple] = []
         self.file_id = generate_entity_id(EntityType.FILE, self.file_path, self.file_path)
 
     def _get_qualified_name(self, name: str) -> str:
@@ -35,7 +35,7 @@ class PythonSymbolVisitor(ast.NodeVisitor):
             module_path = module_path[:-9]
         if module_path:
             parts.append(module_path)
-        parts.extend(self.namespace_stack)
+        parts.extend(ns_name for ns_name, _ in self.namespace_stack)
         if name:
             parts.append(name)
         return ".".join(parts)
@@ -56,7 +56,7 @@ class PythonSymbolVisitor(ast.NodeVisitor):
 
         if self.namespace_stack:
             parent_qname = self._get_qualified_name("")
-            parent_type = EntityType.CLASS if len(self.namespace_stack) > 0 else EntityType.FILE
+            _, parent_type = self.namespace_stack[-1]
             parent_id = generate_entity_id(parent_type, self.file_path, parent_qname)
         else:
             parent_id = self.file_id
@@ -83,14 +83,17 @@ class PythonSymbolVisitor(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef):
         self._add_entity_and_rel(node, node.name, EntityType.CLASS)
-        self.namespace_stack.append(node.name)
+        self.namespace_stack.append((node.name, EntityType.CLASS))
         self.generic_visit(node)
         self.namespace_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        entity_type = EntityType.METHOD if self.namespace_stack else EntityType.FUNCTION
+        if self.namespace_stack and self.namespace_stack[-1][1] == EntityType.CLASS:
+            entity_type = EntityType.METHOD
+        else:
+            entity_type = EntityType.FUNCTION
         self._add_entity_and_rel(node, node.name, entity_type)
-        self.namespace_stack.append(node.name)
+        self.namespace_stack.append((node.name, entity_type))
         self.generic_visit(node)
         self.namespace_stack.pop()
 

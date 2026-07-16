@@ -378,11 +378,56 @@ async def parse_repo_file(repo_name: str, file_path: str, db: Session = Depends(
     # Dynamically fetch raw file content from GitHub
     source_code = await fetch_file_content(owner, repo_name, repo.default_branch, file_path, current_user.github_access_token)
     
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        from backend.intelligence.rim.enums import EntityType, RelationshipType
+        
+        file_functions = []
+        file_classes = []
+        file_imports = []
+        
+        file_id = None
+        for e in query_layer.model.entities.values():
+            if e.type == EntityType.FILE and e.location.repository_path == file_path:
+                file_id = e.id
+            if e.metadata.get("file_id") == file_path or e.location.repository_path == file_path:
+                if e.type == EntityType.FUNCTION:
+                    file_functions.append({"name": e.name, "line": e.location.start_line})
+                elif e.type == EntityType.CLASS:
+                    file_classes.append({
+                        "id": e.id,
+                        "name": e.name, 
+                        "line": e.location.start_line,
+                        "methods": []
+                    })
+                    
+        # Populate methods
+        for e in query_layer.model.entities.values():
+            if e.type == EntityType.METHOD:
+                for cls in file_classes:
+                    # simplistic check: method is in the same file and declared within the class
+                    # if we have class_id metadata, use it, otherwise fall back to matching file
+                    if e.metadata.get("class_id") == cls["id"] or (e.metadata.get("file_id") == file_path and cls["name"] in e.qualified_name):
+                        cls["methods"].append({"name": e.name, "line": e.location.start_line})
+                        
+        if file_id:
+            for rel in query_layer.model.relationships.values():
+                if rel.type == RelationshipType.IMPORTS and rel.source_id == file_id:
+                    module_name = rel.metadata.get("module", "unknown")
+                    file_imports.append({"module_name": module_name})
+                    
+    except Exception as e:
+        import logging
+        logging.error(f"Error parsing file details: {e}")
+        file_functions = []
+        file_classes = []
+        file_imports = []
+        
     return {
         "source_code": source_code,
-        "imports": [],
-        "functions": [],
-        "classes": [],
+        "imports": file_imports,
+        "functions": file_functions,
+        "classes": file_classes,
         "docstring": ""
     }
 
@@ -488,6 +533,47 @@ def get_stats(repo_name: str, db: Session = Depends(get_db), current_user: User 
         }
     except HTTPException:
         return {}
+
+
+@repo_router.get("/{repo_name}/features")
+def get_features(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+        features = sorted(
+            query_layer.model.features.values(),
+            key=lambda feature: (-float(feature.confidence or 0.0), feature.name.lower())
+        )
+        relationships = list(query_layer.model.feature_relationships.values())
+
+        feature_map = {}
+        for feature in features:
+            members = [
+                {
+                    "item_id": member.item_id,
+                    "item_type": member.item_type,
+                    "confidence": member.confidence,
+                }
+                for member in feature.members
+            ]
+            feature_map[feature.id] = {
+                "id": feature.id,
+                "name": feature.name,
+                "description": feature.description,
+                "confidence": feature.confidence,
+                "member_count": len(feature.members),
+                "evidence_count": len(feature.evidence),
+                "members": members,
+                "metadata": feature.metadata,
+            }
+
+        return {
+            "features": list(feature_map.values()),
+            "relationships": [rel.model_dump() for rel in relationships],
+            "feature_count": len(feature_map),
+            "relationship_count": len(relationships),
+        }
+    except HTTPException:
+        return {"features": [], "relationships": [], "feature_count": 0, "relationship_count": 0}
 
 @repo_router.get("/{repo_name}/health/findings")
 def get_health_findings(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -1207,4 +1293,99 @@ def explain_trace(repo_name: str, req: ExplainTraceRequest):
     except Exception as e:
         logger.error(f"Explanation failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate explanation")
+
+
+@repo_router.get("/{repo_name}/context")
+def build_context_pack(repo_name: str, q: str = "", db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        query_layer = get_or_build_model(repo_name, db, current_user)
+    except Exception as e:
+        logger.error(f"Failed to build model for context pack: {e}")
+        return {"context_pack": None}
+
+    from collections import Counter
+    from backend.intelligence.rim.enums import EntityType, RelationshipType
+
+    entity_counts = Counter(e.type.value for e in query_layer.model.entities.values())
+    relationship_counts = Counter(r.type.value if hasattr(r.type, "value") else str(r.type) for r in query_layer.model.relationships.values())
+
+    features = sorted(
+        query_layer.model.features.values(),
+        key=lambda feature: (-float(feature.confidence or 0.0), feature.name.lower())
+    )
+
+    feature_summaries = [
+        {
+            "id": feature.id,
+            "name": feature.name,
+            "description": feature.description,
+            "confidence": feature.confidence,
+            "member_count": len(feature.members),
+        }
+        for feature in features[:5]
+    ]
+
+    symbols = []
+    graph = {"nodes": [], "edges": []}
+    query_service = GraphQueryService(query_layer.model)
+
+    if q and q.strip():
+        symbols = query_service.search(q)[:5]
+        if symbols:
+            graph = query_service.traverse(symbols[0]["id"], direction="both", depth=1, max_nodes=20, relationship_type="calls")
+
+    matched_features = []
+    if q and q.strip():
+        query_lower = q.lower()
+        for feature in features:
+            if query_lower in feature.name.lower() or query_lower in feature.description.lower():
+                matched_features.append({
+                    "id": feature.id,
+                    "name": feature.name,
+                    "description": feature.description,
+                    "confidence": feature.confidence,
+                    "member_count": len(feature.members),
+                })
+
+    matched_symbol_ids = set()
+    for feature in matched_features:
+        feature_obj = query_layer.model.features.get(feature["id"])
+        if not feature_obj:
+            continue
+        for member in feature_obj.members:
+            if member.item_id in query_layer.model.entities:
+                matched_symbol_ids.add(member.item_id)
+
+    for symbol in symbols:
+        matched_symbol_ids.add(symbol["id"])
+
+    matched_symbol_list = []
+    for symbol_id in matched_symbol_ids:
+        entity = query_layer.model.entities.get(symbol_id)
+        if not entity:
+            continue
+        matched_symbol_list.append({
+            "id": symbol_id,
+            "name": entity.name,
+            "type": entity.type.value.lower(),
+            "file": entity.location.repository_path,
+        })
+
+    matched_symbol_list.sort(key=lambda item: (item["name"].lower(), item["id"]))
+
+    return {
+        "context_pack": {
+            "query": q,
+            "repository": {
+                "feature_count": len(features),
+                "symbol_count": sum(1 for e in query_layer.model.entities.values() if e.type in (EntityType.CLASS, EntityType.FUNCTION, EntityType.METHOD)),
+                "entity_counts": dict(entity_counts),
+                "relationship_counts": dict(relationship_counts),
+            },
+            "features": feature_summaries,
+            "matched_features": matched_features[:5],
+            "matched_symbols": matched_symbol_list[:5],
+            "graph": graph,
+        }
+    }
 

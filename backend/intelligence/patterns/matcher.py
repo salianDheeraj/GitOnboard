@@ -2,7 +2,7 @@ import re
 from typing import Dict, List, Any, Set, Tuple
 from .model import Pattern, Evidence, PatternCategory, PatternType
 from ..rim.repository import RepositoryModel
-from ..rim.query import GraphQueryService
+from ..graphs.graph_query_service import GraphQueryService
 from ..rim.enums import EntityType, RelationshipType
 import uuid
 

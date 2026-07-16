@@ -105,8 +105,57 @@ class AnalysisWorker(WorkerInterface):
                     # Serialize the populated RIM
                     json_str = serialize_rim(model)
                     
+                    # Generate metrics
+                    from backend.intelligence.rim.enums import EntityType
+                    import os
+                    files = [e for e in model.entities.values() if e.type == EntityType.FILE]
+                    functions = [e for e in model.entities.values() if e.type == EntityType.FUNCTION]
+                    classes = [e for e in model.entities.values() if e.type == EntityType.CLASS]
+                        
+                    lines_of_code = 0
+                    largest_files = []
+                    for f in files:
+                        path = os.path.join(str(target_dir), f.location.repository_path)
+                        size = 0
+                        if os.path.exists(path):
+                            size = os.path.getsize(path)
+                            try:
+                                with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+                                    lines_of_code += sum(1 for _ in fh)
+                            except:
+                                pass
+                        largest_files.append({"file": f.location.repository_path, "size": size})
+                        
+                    largest_files.sort(key=lambda x: x["size"], reverse=True)
+                    largest_files = largest_files[:5]
+                    
+                    module_funcs = {}
+                    for fn in functions:
+                        file_id = fn.metadata.get("file_id", fn.location.repository_path)
+                        module_funcs[file_id] = module_funcs.get(file_id, 0) + 1
+                    
+                    largest_modules = [{"module": k, "functions": v} for k, v in module_funcs.items()]
+                    largest_modules.sort(key=lambda x: x["functions"], reverse=True)
+                    largest_modules = largest_modules[:5]
+                    
+                    avg_complexity = lines_of_code / max(1, len(functions))
+                    
+                    metrics_data = {
+                        "total_files": len(files),
+                        "lines_of_code": lines_of_code,
+                        "total_functions": len(functions),
+                        "total_classes": len(classes),
+                        "total_modules": len(module_funcs) or len(files),
+                        "test_coverage_approx_percent": 0.0,
+                        "documentation_coverage_percent": 0.0,
+                        "average_cyclomatic_complexity": round(avg_complexity, 2),
+                        "largest_files": largest_files,
+                        "largest_modules": largest_modules
+                    }
+                    
                     return {
-                        "core_model": json_str.encode("utf-8")
+                        "core_model": json_str.encode("utf-8"),
+                        "metrics": metrics_data
                     }
 
                 logger.info(f"Analyzing {repo_name}...")

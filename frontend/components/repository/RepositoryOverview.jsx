@@ -40,21 +40,24 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
   const [healthData, setHealthData] = useState(null);
   const [statsData, setStatsData] = useState(null);
   const [findingsData, setFindingsData] = useState(null);
+  const [featureData, setFeatureData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     const fetchRealData = async () => {
       setIsLoading(true);
       try {
-        const [healthRes, statsRes, findingsRes] = await Promise.all([
+        const [healthRes, statsRes, findingsRes, featuresRes] = await Promise.all([
           fetch(`/api/repos/${repoName}/health/scores`),
           fetch(`/api/repos/${repoName}/stats`),
-          fetch(`/api/repos/${repoName}/health/findings`)
+          fetch(`/api/repos/${repoName}/health/findings`),
+          fetch(`/api/repos/${repoName}/features`)
         ]);
 
         if (healthRes.ok) setHealthData(await healthRes.json());
         if (statsRes.ok) setStatsData(await statsRes.json());
         if (findingsRes.ok) setFindingsData(await findingsRes.json());
+        if (featuresRes.ok) setFeatureData(await featuresRes.json());
       } catch (err) {
         console.error("Failed to load overview data", err);
       } finally {
@@ -79,6 +82,7 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
   
   const findings = findingsData?.findings || [];
   const topFindings = findings.slice(0, 3);
+  const discoveredFeatures = featureData?.features || [];
 
   const getStatusColor = (statusText) => {
     switch (statusText) {
@@ -261,7 +265,42 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
       </div>
       
       {/* Bottom Section (AI Summary, Findings, Actions) */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-6">
+
+        {/* Feature Discovery */}
+        <Card className="lg:col-span-1">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-semibold text-slate-800 flex items-center"><Sparkles className="w-4 h-4 mr-2 text-blue-500" /> Feature Discovery</h3>
+            <Link href={`/repository/${repoName}/summary`} className="text-xs text-blue-600 hover:underline cursor-pointer">View model &rarr;</Link>
+          </div>
+          <div className="space-y-3">
+            {isLoading ? (
+              <p className="text-sm text-slate-500">Loading features...</p>
+            ) : discoveredFeatures.length > 0 ? (
+              discoveredFeatures.slice(0, 4).map((feature) => (
+                <div key={feature.id} className="rounded-lg border border-slate-200 p-3 bg-white">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">{feature.name}</p>
+                      {feature.description && <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{feature.description}</p>}
+                    </div>
+                    <Badge variant={feature.confidence >= 0.75 ? "success" : feature.confidence >= 0.5 ? "warning" : "neutral"}>
+                      {Math.round((feature.confidence || 0) * 100)}%
+                    </Badge>
+                  </div>
+                  <div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.max(8, Math.round((feature.confidence || 0) * 100))}%` }} />
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500">
+                    {feature.member_count} members · {feature.evidence_count} evidence items
+                  </p>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-slate-500">No features reconstructed yet.</p>
+            )}
+          </div>
+        </Card>
         
         {/* AI Summary */}
         <Card className="lg:col-span-1">

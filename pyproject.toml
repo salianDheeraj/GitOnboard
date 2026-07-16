@@ -42,7 +42,8 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = [
-  "src"
+  "src",
+  "."
 ]
 testpaths = [
   "tests"

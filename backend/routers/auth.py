@@ -48,15 +48,16 @@ def github_callback(code: str, db: Session = Depends(get_db)):
         redirect_url = f"{settings.frontend_url}/dashboard"
         response = RedirectResponse(url=redirect_url, status_code=302)
         
-        # Set Secure=True in production (HTTPS)
         is_secure = settings.environment.lower() == "production"
+        same_site = "none" if is_secure else "lax"
         
         response.set_cookie(
             key="access_token",
             value=jwt_token,
             httponly=True,
             secure=is_secure,
-            samesite="lax",
+            samesite=same_site,
+            path="/",
             max_age=settings.jwt_expire_minutes * 60
         )
         
@@ -86,5 +87,5 @@ def get_me(current_user: User = Depends(get_current_user)):
 def logout():
     """Logs out the user by clearing the JWT cookie."""
     response = Response(content='{"message": "Logged out successfully"}', media_type="application/json")
-    response.delete_cookie("access_token", path="/", httponly=True, samesite="lax")
+    response.delete_cookie("access_token", path="/")
     return response

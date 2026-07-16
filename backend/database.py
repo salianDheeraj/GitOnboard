@@ -1,12 +1,14 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from backend.config import settings
 
-# Since psycopg3 is recommended, we might need to change the postgresql driver prefix
-# 'postgresql://' usually defaults to psycopg2. With psycopg3, 'postgresql+psycopg://' is used in SQLAlchemy.
-SQLALCHEMY_DATABASE_URL = settings.database_url
+# Support both the legacy DATABASE_URL env var and the config-backed database URL.
+# Docker Compose still injects DATABASE_URL, while local development uses settings.database_url.
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL") or settings.database_url
 if SQLALCHEMY_DATABASE_URL.startswith("postgresql://") and "psycopg2" not in SQLALCHEMY_DATABASE_URL:
     SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgresql://", "postgresql+psycopg://")
 

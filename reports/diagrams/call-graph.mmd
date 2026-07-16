@@ -1,0 +1,59 @@
+graph TB
+    subgraph "Repository Import Flow"
+        I1["import_repo()\nrepo.py:107"]
+        I2["check_repo_limits()\ngithub.py"]
+        I3["repo_queue.enqueue(job_id)\nqueue.py"]
+        I4["AnalysisWorker.process(job_id)\nworker.py"]
+        I5["download_repo_zipball()\ngithub.py"]
+        I6["run_analysis() closure\nworker.py"]
+        I7["AnalysisEngine.run()\npipeline.py"]
+        I8["serialize_rim()\nserialization.py"]
+        I9["AnalysisArtifact saved\ndatabase.py"]
+    end
+
+    subgraph "Query Endpoint Pattern"
+        Q1["Any route handler\nrepo.py"]
+        Q2["get_or_build_model()\nrepo.py:567\n⚠️ No caching"]
+        Q3["_get_latest_analysis()\nrepo.py:253"]
+        Q4["deserialize_rim()\nserialization.py"]
+        Q5["QueryLayer(model)\nquery_layer.py"]
+    end
+
+    subgraph "SSE Notification"
+        S1["set_task_status()\nrepo.py:591"]
+        S2["task_manager.notify()\ntask_manager.py"]
+        S3["asyncio.Queue.put()\n(per subscriber)"]
+        S4["stream_tasks()\nrepo.py:41\nSSE generator"]
+    end
+
+    subgraph "Feature Trace Flow"
+        T1["trace_feature()\nrepo.py:1144"]
+        T2["get_chroma_collection()\nrepo.py:984"]
+        T3["collection.query()\nChromaDB"]
+        T4["DeterministicTracer.trace_feature()\nfeature_tracing.py"]
+        T5["Expand DEPENDS_ON\nExpand CALLS\nOrder by layers"]
+    end
+
+    I1 -->|"validates URL"| I2
+    I2 -->|"ok"| I3
+    I3 -->|"async dequeue"| I4
+    I4 --> I5
+    I4 --> I6
+    I6 --> I7
+    I7 -->|"RepositoryModel"| I8
+    I8 -->|"JSON bytes"| I9
+
+    Q1 --> Q2
+    Q2 --> Q3
+    Q3 -->|"repo, analysis"| Q2
+    Q2 --> Q4
+    Q4 -->|"RepositoryModel"| Q5
+
+    S1 --> S2
+    S2 --> S3
+    S3 -->|"SSE event"| S4
+
+    T1 --> T2
+    T2 --> T3
+    T3 -->|"seed node metadata"| T4
+    T4 --> T5

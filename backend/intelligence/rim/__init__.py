@@ -7,7 +7,6 @@ from .repository import RepositoryModel
 from .identity import generate_entity_id, generate_relationship_id
 from .validation import RIMValidator
 from .serialization import serialize_rim, deserialize_rim
-from .query import RepositoryQueryService, GraphQueryService
 
 __all__ = [
     "EntityType",
@@ -21,7 +20,5 @@ __all__ = [
     "generate_relationship_id",
     "RIMValidator",
     "serialize_rim",
-    "deserialize_rim",
-    "RepositoryQueryService",
-    "GraphQueryService"
+    "deserialize_rim"
 ]

@@ -1,0 +1,68 @@
+sequenceDiagram
+    participant BROWSER as Browser
+    participant PROXY as Next.js Proxy<br/>(next.config.ts)
+    participant FASTAPI as FastAPI Backend
+    participant DB as PostgreSQL
+    participant WORKER as AnalysisWorker
+    participant GITHUB as GitHub API
+    participant CHROMA as ChromaDB
+    participant OLLAMA as Ollama LLM
+
+    Note over BROWSER,PROXY: ⚠️ Login bypasses proxy via hard-coded URL
+
+    BROWSER->>FASTAPI: GET /api/auth/github/login (direct)
+    FASTAPI->>GITHUB: OAuth redirect
+    GITHUB-->>FASTAPI: GET /api/auth/github/callback?code=...
+    FASTAPI->>GITHUB: POST /login/oauth/access_token
+    FASTAPI->>GITHUB: GET /user
+    FASTAPI->>DB: get_or_create_user()
+    FASTAPI-->>BROWSER: Set-Cookie: access_token=JWT; redirect to frontend
+
+    BROWSER->>PROXY: GET /api/repos (Cookie: access_token)
+    PROXY->>FASTAPI: GET /api/repos (forwarded with cookie)
+    FASTAPI->>DB: jwt.decode + User query (get_current_user)
+    FASTAPI->>DB: Repository + Analysis + Artifact queries
+    FASTAPI-->>PROXY: {"repositories": [...]}
+    PROXY-->>BROWSER: JSON response
+
+    BROWSER->>PROXY: POST /api/import {"url": "..."}
+    PROXY->>FASTAPI: POST /api/import
+    FASTAPI->>GITHUB: check_repo_limits()
+    FASTAPI->>DB: Create Repository, Analysis, AnalysisJob
+    FASTAPI-->>BROWSER: {"status": "Queued"}
+
+    Note over FASTAPI,WORKER: Background job processing
+
+    FASTAPI->>WORKER: enqueue(job_id)
+    WORKER->>GITHUB: download_repo_zipball() → /tmp/
+    WORKER->>WORKER: AnalysisEngine.run() (AST parsing + analysis)
+    WORKER->>DB: Save AnalysisArtifact(core_model, blob_data)
+    WORKER->>DB: analysis.status = "Completed"
+
+    BROWSER->>PROXY: GET /api/repos/{name}/scan (polling every 3s)
+    PROXY->>FASTAPI: GET /api/repos/{name}/scan
+    FASTAPI->>DB: get_or_build_model() → deserialize JSON
+    FASTAPI-->>BROWSER: {"status": "completed", "hierarchy": {...}}
+
+    BROWSER->>PROXY: EventSource /api/repos/{name}/tasks/stream
+    PROXY->>FASTAPI: GET /api/repos/{name}/tasks/stream (SSE)
+    Note over FASTAPI: Keeps connection open, sends events
+
+    BROWSER->>PROXY: POST /api/repos/{name}/semantic-index
+    PROXY->>FASTAPI: POST
+    FASTAPI->>CHROMA: create_collection + add embeddings (background)
+    FASTAPI-->>BROWSER: {"status": "processing"}
+    FASTAPI-->>BROWSER: SSE: {"semantic_index": "completed"}
+
+    BROWSER->>PROXY: GET /api/repos/{name}/semantic-search?q=auth
+    PROXY->>FASTAPI: GET
+    FASTAPI->>CHROMA: collection.query(["auth"])
+    FASTAPI->>DB: get_or_build_model()
+    FASTAPI-->>BROWSER: {"results": [...]}
+
+    BROWSER->>PROXY: POST /api/repos/{name}/summary/generate
+    PROXY->>FASTAPI: POST
+    FASTAPI->>OLLAMA: POST /api/generate (background)
+    OLLAMA-->>FASTAPI: Generated markdown
+    FASTAPI->>DB: Save AnalysisArtifact(summary)
+    FASTAPI-->>BROWSER: SSE: {"summary": "completed"}

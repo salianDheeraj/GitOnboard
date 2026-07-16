@@ -1,0 +1,49 @@
+sequenceDiagram
+    participant UV as uvicorn
+    participant MAIN as main.py
+    participant DB as database.py
+    participant LOGGER as logger.py
+    participant TM as task_manager.py
+    participant QUEUE as queue.py (InMemoryQueue)
+    participant WORKER as worker.py (AnalysisWorker)
+
+    UV->>MAIN: import + startup
+    MAIN->>LOGGER: setup_logging()
+    MAIN->>MAIN: worker = AnalysisWorker()
+    MAIN->>MAIN: repo_queue = InMemoryQueue(worker)
+    MAIN->>MAIN: app = FastAPI(lifespan=lifespan)
+
+    Note over MAIN: lifespan() context manager starts
+
+    MAIN->>DB: Base.metadata.create_all(engine)
+    DB-->>MAIN: Tables created/verified
+
+    MAIN->>TM: task_manager.set_loop(asyncio.get_event_loop())
+    TM-->>MAIN: ok
+
+    MAIN->>MAIN: cleanup_tmp_dirs()
+    Note over MAIN: Removes /tmp/repo-analysis/* orphans
+
+    MAIN->>QUEUE: repo_queue.start()
+    QUEUE->>WORKER: spawn asyncio consumer task
+    QUEUE-->>MAIN: ok
+
+    MAIN->>DB: Query AnalysisJob (status != Completed)
+    DB-->>MAIN: unfinished_jobs[]
+
+    loop For each unfinished job
+        MAIN->>QUEUE: enqueue(job.id)
+        Note over MAIN: Job recovery loop
+    end
+
+    MAIN->>MAIN: Register CORSMiddleware
+    MAIN->>MAIN: include_router(auth_router, prefix=/api)
+    MAIN->>MAIN: include_router(health_router, prefix=/api)
+    MAIN->>MAIN: include_router(import_router, prefix=/api/import)
+    MAIN->>MAIN: include_router(repo_router, prefix=/api/repos)
+
+    Note over UV,WORKER: Application ready — accepting requests
+
+    Note over MAIN: lifespan() shutdown:
+    MAIN->>QUEUE: repo_queue.stop()
+    QUEUE-->>MAIN: ok

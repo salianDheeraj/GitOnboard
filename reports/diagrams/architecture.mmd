@@ -1,0 +1,80 @@
+graph TB
+    subgraph "Browser"
+        FE_LOGIN["Login Page<br/>app/page.tsx"]
+        FE_DASH["Dashboard<br/>app/dashboard/page.tsx"]
+        FE_REPO["Repository Overview<br/>app/repository/[name]/page.tsx"]
+        FE_TABS["Feature Tabs<br/>app/repository/[name]/[tab]/page.tsx"]
+        FE_TRACE["Feature Tracing<br/>app/repository/[name]/trace/page.tsx"]
+    end
+
+    subgraph "Next.js Proxy"
+        PROXY["/api/* → 127.0.0.1:8000/api/*<br/>next.config.ts"]
+    end
+
+    subgraph "FastAPI Backend"
+        AUTH["auth_router<br/>/api/auth/github/*"]
+        IMPORT["import_router<br/>POST /api/import"]
+        REPO_R["repo_router<br/>/api/repos/*"]
+        HEALTH_EP["GET /health"]
+    end
+
+    subgraph "Services"
+        GH_SVC["github.py<br/>download_repo_zipball<br/>fetch_file_content"]
+        GH_OAUTH["github_oauth.py<br/>OAuth flow"]
+        WORKER["AnalysisWorker<br/>worker.py"]
+        QUEUE["InMemoryQueue<br/>queue.py"]
+        LLM["LLMService<br/>llm_service.py"]
+        TM["TaskManager<br/>task_manager.py<br/>SSE pub/sub"]
+    end
+
+    subgraph "Intelligence Engine"
+        ENGINE["AnalysisEngine<br/>engine/orchestration/pipeline.py"]
+        ANALYZERS["9 Analyzers<br/>Symbol, CallGraph, Import, etc."]
+        PATTERNS["PatternRecognitionEngine"]
+        CAPS["CapabilityBuilderEngine"]
+        FEATS["FeatureReconstructionEngine"]
+    end
+
+    subgraph "Data Layer"
+        DB[("PostgreSQL<br/>Users, Repos, Analyses<br/>Artifacts, Jobs")]
+        CHROMA[("ChromaDB<br/>Vector Store<br/>Semantic Index")]
+        OLLAMA["Ollama<br/>localhost:11434"]
+    end
+
+    subgraph "External"
+        GITHUB["GitHub API<br/>api.github.com"]
+    end
+
+    FE_LOGIN -->|"Login button"| PROXY
+    FE_DASH -->|"API calls"| PROXY
+    FE_REPO -->|"API calls"| PROXY
+    FE_TABS -->|"API calls"| PROXY
+    FE_TRACE -->|"API calls"| PROXY
+
+    PROXY --> AUTH
+    PROXY --> IMPORT
+    PROXY --> REPO_R
+    PROXY --> HEALTH_EP
+
+    AUTH --> GH_OAUTH
+    GH_OAUTH --> GITHUB
+    GH_OAUTH --> DB
+
+    IMPORT --> QUEUE
+    QUEUE --> WORKER
+    WORKER --> GH_SVC
+    GH_SVC --> GITHUB
+
+    WORKER --> ENGINE
+    ENGINE --> ANALYZERS
+    WORKER --> PATTERNS
+    WORKER --> CAPS
+    WORKER --> FEATS
+    WORKER --> DB
+
+    REPO_R --> DB
+    REPO_R --> CHROMA
+    REPO_R --> LLM
+    REPO_R --> TM
+
+    LLM --> OLLAMA

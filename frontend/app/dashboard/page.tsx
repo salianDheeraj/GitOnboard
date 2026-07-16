@@ -30,6 +30,19 @@ export default function Dashboard() {
     }
   };
 
+  const getRepositoryPath = (repo: any) => {
+    if (repo.repository_path) return repo.repository_path;
+    if (repo.url) {
+      try {
+        const parsed = new URL(repo.url);
+        return parsed.pathname.replace(/^\//, '').replace(/\.git$/, '');
+      } catch {
+        return repo.url;
+      }
+    }
+    return '';
+  };
+
   useEffect(() => {
     fetchRepos();
   }, []);
@@ -127,7 +140,7 @@ export default function Dashboard() {
                 <div className="space-y-4 flex-grow">
                   <div>
                     <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block mb-1">Path</span>
-                    <p className="text-sm text-slate-600 font-mono bg-slate-50 p-2 rounded line-clamp-1">{repo.repository_path}</p>
+                    <p className="text-sm text-slate-600 font-mono bg-slate-50 p-2 rounded line-clamp-1">{getRepositoryPath(repo)}</p>
                   </div>
                   
                   <div>

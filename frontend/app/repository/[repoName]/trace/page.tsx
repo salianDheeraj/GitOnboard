@@ -14,6 +14,7 @@ export default function FeatureTracingPage() {
   const [query, setQuery] = useState('');
   const [isTracing, setIsTracing] = useState(false);
   const [traceResult, setTraceResult] = useState<any>(null);
+  const [contextPack, setContextPack] = useState<any>(null);
   
   const [isExplaining, setIsExplaining] = useState(false);
   const [explanation, setExplanation] = useState<string | null>(null);
@@ -24,15 +25,25 @@ export default function FeatureTracingPage() {
     
     setIsTracing(true);
     setTraceResult(null);
+    setContextPack(null);
     setExplanation(null);
     
     try {
-      const res = await fetch(`/api/repos/${repoName}/trace?q=${encodeURIComponent(query)}`);
-      if (res.ok) {
-        const data = await res.json();
+      const [traceRes, contextRes] = await Promise.all([
+        fetch(`/api/repos/${repoName}/trace?q=${encodeURIComponent(query)}`),
+        fetch(`/api/repos/${repoName}/context?q=${encodeURIComponent(query)}`)
+      ]);
+
+      if (traceRes.ok) {
+        const data = await traceRes.json();
         setTraceResult(data.trace);
       } else {
         alert("Failed to generate trace.");
+      }
+
+      if (contextRes.ok) {
+        const data = await contextRes.json();
+        setContextPack(data.context_pack);
       }
     } catch (err) {
       console.error(err);
@@ -145,42 +156,100 @@ export default function FeatureTracingPage() {
           </div>
           
           <div className="lg:col-span-1">
-            <Card className="sticky top-8">
-              <CardHeader title="AI Explanation" />
-              <div className="p-6">
-                {!explanation ? (
-                  <div className="text-center py-8">
-                    <Sparkles className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-                    <p className="text-slate-500 mb-6 text-sm">
-                      Understand how these components work together to implement the feature.
-                    </p>
-                    <Button 
-                      variant="secondary" 
-                      onClick={handleExplain}
-                      disabled={isExplaining}
-                      className="w-full"
-                    >
-                      {isExplaining ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Sparkles className="w-4 h-4 mr-2" />}
-                      Explain Trace
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="prose prose-sm prose-slate max-w-none">
-                    <div className="bg-blue-50 text-blue-900 p-4 rounded-lg text-sm leading-relaxed whitespace-pre-wrap">
-                      {explanation}
+            <div className="sticky top-8 space-y-6">
+              <Card>
+                <CardHeader title="Graph-Aware Context" />
+                <div className="p-6 space-y-4">
+                  {contextPack ? (
+                    <>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div className="rounded-lg border border-slate-200 p-3">
+                          <p className="text-xs uppercase tracking-wider text-slate-500">Features</p>
+                          <p className="text-lg font-bold text-slate-900">{contextPack.repository?.feature_count ?? 0}</p>
+                        </div>
+                        <div className="rounded-lg border border-slate-200 p-3">
+                          <p className="text-xs uppercase tracking-wider text-slate-500">Symbols</p>
+                          <p className="text-lg font-bold text-slate-900">{contextPack.repository?.symbol_count ?? 0}</p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">Top Features</p>
+                        <div className="space-y-2">
+                          {(contextPack.features || []).slice(0, 3).map((feature: any) => (
+                            <div key={feature.id} className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-medium text-slate-900">{feature.name}</p>
+                                  <p className="text-xs text-slate-500">{feature.member_count} members</p>
+                                </div>
+                                <Badge variant="neutral">{Math.round((feature.confidence || 0) * 100)}%</Badge>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {(contextPack.matched_symbols || []).length > 0 && (
+                        <div>
+                          <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">Matched Symbols</p>
+                          <div className="space-y-2">
+                            {contextPack.matched_symbols.slice(0, 3).map((symbol: any) => (
+                              <div key={symbol.id} className="rounded-lg border border-slate-200 p-3">
+                                <p className="text-sm font-medium text-slate-900">{symbol.name}</p>
+                                <p className="text-xs text-slate-500 font-mono truncate">{symbol.file}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-center py-6">
+                      <Sparkles className="w-12 h-12 text-slate-300 mx-auto mb-4" />
+                      <p className="text-slate-500 text-sm">Build a context pack to summarize features, symbols, and graph neighbors.</p>
                     </div>
-                    <Button 
-                      variant="ghost" 
-                      onClick={handleExplain}
-                      disabled={isExplaining}
-                      className="w-full mt-4 text-xs"
-                    >
-                      Regenerate
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </Card>
+                  )}
+                </div>
+              </Card>
+
+              <Card>
+                <CardHeader title="AI Explanation" />
+                <div className="p-6">
+                  {!explanation ? (
+                    <div className="text-center py-8">
+                      <Sparkles className="w-12 h-12 text-slate-300 mx-auto mb-4" />
+                      <p className="text-slate-500 mb-6 text-sm">
+                        Understand how these components work together to implement the feature.
+                      </p>
+                      <Button 
+                        variant="secondary" 
+                        onClick={handleExplain}
+                        disabled={isExplaining || !traceResult}
+                        className="w-full"
+                      >
+                        {isExplaining ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Sparkles className="w-4 h-4 mr-2" />}
+                        Explain Trace
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="prose prose-sm prose-slate max-w-none">
+                      <div className="bg-blue-50 text-blue-900 p-4 rounded-lg text-sm leading-relaxed whitespace-pre-wrap">
+                        {explanation}
+                      </div>
+                      <Button 
+                        variant="ghost" 
+                        onClick={handleExplain}
+                        disabled={isExplaining}
+                        className="w-full mt-4 text-xs"
+                      >
+                        Regenerate
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </Card>
+            </div>
           </div>
         </div>
       )}
