@@ -2,26 +2,45 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { Search, Sun, Bell, Settings, User, LogOut } from 'lucide-react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Search, Bell, User, LogOut } from 'lucide-react';
 import { Button } from '../common/Button';
 
 export function Header() {
   const [user, setUser] = useState(null);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const [query, setQuery] = useState(searchParams.get('search') || '');
 
   useEffect(() => {
-    // Fetch current user
     fetch('/api/auth/github/me')
       .then(res => res.ok ? res.json() : null)
       .then(data => setUser(data))
       .catch(() => setUser(null));
   }, []);
 
+  const handleSearchChange = (e) => {
+    const val = e.target.value;
+    setQuery(val);
+    if (val.trim()) {
+      router.push(`/dashboard?search=${encodeURIComponent(val)}`);
+    } else {
+      router.push('/dashboard');
+    }
+  };
+
   const handleLogout = async () => {
-    await fetch('/api/auth/github/logout', { method: 'POST' });
-    setUser(null);
-    router.push('/');
+    try {
+      await fetch('/api/auth/github/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      localStorage.clear();
+      sessionStorage.clear();
+      window.location.href = '/';
+    } catch (err) {
+      console.error('Logout failed:', err);
+    }
   };
 
   return (
@@ -42,8 +61,10 @@ export function Header() {
           </div>
           <input 
             type="text" 
+            value={query}
+            onChange={handleSearchChange}
             placeholder="Search repositories, files, symbols..." 
-            className="block w-full pl-10 pr-3 py-2 border border-slate-200 rounded-lg bg-slate-50 text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm transition-colors"
+            className="block w-full pl-10 pr-10 py-2 border border-slate-200 rounded-lg bg-slate-50 text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm transition-colors"
           />
           <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
             <span className="text-xs text-slate-400 border border-slate-200 rounded px-1.5 py-0.5 bg-white font-mono">⌘ K</span>
