@@ -15,6 +15,10 @@ from backend.models.repository import Repository, AnalysisJob
 from backend.services.queue import InMemoryQueue
 from backend.services.worker import AnalysisWorker
 from backend.task_manager import task_manager
+from backend.routers.intelligence import router as new_intelligence_router
+
+# Creates all relational Fact Store tables automatically on app startup
+Base.metadata.create_all(bind=engine)
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -93,6 +97,7 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(health_router, prefix="/api")
 app.include_router(import_router, prefix="/api/import")
 app.include_router(repo_router, prefix="/api/repos")
+app.include_router(new_intelligence_router)
 
 @app.get("/")
 def read_root():

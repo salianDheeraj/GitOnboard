@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, LargeBinary
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, LargeBinary, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime, timezone
@@ -35,7 +35,7 @@ class AnalysisArtifact(Base):
     id = Column(Integer, primary_key=True, index=True)
     analysis_id = Column(Integer, ForeignKey("analyses.id"), nullable=False)
     type = Column(String, index=True, nullable=False) # e.g., 'metrics', 'ast', 'dependency_graph'
-    data = Column(JSONB, nullable=True)
+    data = Column(JSON().with_variant(JSONB, "postgresql"), nullable=True)
     blob_data = Column(LargeBinary, nullable=True)
     
     analysis = relationship("Analysis", back_populates="artifacts")

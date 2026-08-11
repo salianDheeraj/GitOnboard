@@ -1,5 +1,7 @@
 from .enums import EntityType, RelationshipType
 
+import hashlib
+
 def generate_entity_id(entity_type: EntityType, repository_path: str, qualified_name: str) -> str:
     """
     Generate a stable ID for an entity.
@@ -7,6 +9,15 @@ def generate_entity_id(entity_type: EntityType, repository_path: str, qualified_
     """
     type_str = entity_type.value.lower()
     return f"urn:{type_str}:{repository_path}#{qualified_name}"
+
+
+def generate_stable_id(repo_id: str, file_path: str, qualified_name: str, signature_hash: str = "") -> str:
+    """
+    Generates a deterministic stable ID for a code symbol.
+    Ensures symbol identity remains consistent across line number changes.
+    """
+    raw_key = f"{repo_id}:{file_path}:{qualified_name}:{signature_hash}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:32]
 
 def generate_relationship_id(relationship_type: RelationshipType, source_id: str, target_id: str) -> str:
     """

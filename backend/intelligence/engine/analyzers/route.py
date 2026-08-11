@@ -8,6 +8,7 @@ from ...rim.relationship import Relationship
 from ...rim.enums import EntityType, RelationshipType
 from ...rim.location import SourceLocation
 from ...rim.identity import generate_entity_id, generate_relationship_id
+from backend.intelligence.rim.identity import generate_stable_id
 
 class PythonRouteVisitor(ast.NodeVisitor):
     def __init__(self, file_path: str):
@@ -62,19 +63,49 @@ class PythonRouteVisitor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
         self.visit_FunctionDef(node)
 
+
 class RouteAnalyzer(BaseAnalyzer):
     name = "RouteAnalyzer"
     supported_languages = ["Python"]
+
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
 
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
             if parsed.language not in self.supported_languages or not parsed.ast:
                 continue
-                
             visitor = PythonRouteVisitor(file_path)
             visitor.visit(parsed.ast)
-            
             for ent in visitor.entities:
                 repository.entities[ent.id] = ent
             for rel in visitor.relationships:
                 repository.relationships[rel.id] = rel
+
+    def extract_routes(self, asts, symbols: list[dict] = None) -> list[dict]:
+        routes = []
+        if isinstance(asts, dict):
+            for file_path, parsed in asts.items():
+                if parsed.language == "Python" and parsed.ast:
+                    visitor = PythonRouteVisitor(file_path)
+                    visitor.visit(parsed.ast)
+                    for ent in visitor.entities:
+                        if ent.type == EntityType.ROUTE:
+                            method = ent.metadata.get("method", "GET")
+                            path = ent.metadata.get("path", "/")
+                            handler_symbol_id = ""
+                            for rel in visitor.relationships:
+                                if rel.target_id == ent.id and rel.type == RelationshipType.EXPOSES:
+                                    handler_symbol_id = rel.source_id
+                                    break
+                            
+                            route_id = generate_stable_id(self.repo_id, file_path, f"route:{method}:{path}", "")
+                            routes.append({
+                                "id": route_id,
+                                "symbol_id": route_id,
+                                "method": method,
+                                "path": path,
+                                "handler_symbol_id": handler_symbol_id
+                            })
+        return routes

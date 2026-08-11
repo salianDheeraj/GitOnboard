@@ -172,9 +172,15 @@ def _process_synthetic_ast(
 # SymbolAnalyzer
 # --------------------------------------------------------------------------- #
 
+from backend.intelligence.rim.identity import generate_stable_id
+
 class SymbolAnalyzer(BaseAnalyzer):
     name = "SymbolAnalyzer"
     supported_languages = ["Python", "TypeScript", "JavaScript", "Java"]
+
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
 
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
@@ -218,7 +224,6 @@ class SymbolAnalyzer(BaseAnalyzer):
                     )
 
             if parsed.language == "Python" and parsed.ast is not None:
-                # Use real Python AST visitor
                 visitor = PythonSymbolVisitor(file_path, parsed.source)
                 visitor.visit(parsed.ast)
                 for ent in visitor.entities:
@@ -227,5 +232,45 @@ class SymbolAnalyzer(BaseAnalyzer):
                 for rel in visitor.relationships:
                     repository.relationships[rel.id] = rel
             else:
-                # Use synthetic AST from TS/JS/Java providers
                 _process_synthetic_ast(file_path, parsed, repository, file_id)
+
+    def extract_symbols(self, asts) -> list[dict]:
+        symbols = []
+        if isinstance(asts, dict):
+            for file_path, parsed in asts.items():
+                if parsed.language == "Python" and parsed.ast:
+                    visitor = PythonSymbolVisitor(file_path, parsed.source)
+                    visitor.visit(parsed.ast)
+                    for ent in visitor.entities:
+                        sig_hash = ent.metadata.get("signature_hash", "")
+                        stable_id = generate_stable_id(self.repo_id, file_path, ent.qualified_name, sig_hash)
+                        symbols.append({
+                            "stable_id": stable_id,
+                            "file_id": f"{self.repo_id}:{file_path}",
+                            "name": ent.name,
+                            "qualified_name": ent.qualified_name,
+                            "symbol_type": ent.type.value.lower() if hasattr(ent.type, "value") else str(ent.type),
+                            "line_start": ent.location.start_line,
+                            "line_end": ent.location.end_line,
+                            "signature_hash": sig_hash,
+                            "metadata": ent.metadata
+                        })
+                elif parsed.ast and isinstance(parsed.ast, dict):
+                    for sym in parsed.ast.get("symbols", []):
+                        name = sym.get("name", "")
+                        sym_type_str = sym.get("type", "function")
+                        module_path = file_path.rsplit(".", 1)[0].replace("/", ".")
+                        qname = f"{module_path}.{name}"
+                        stable_id = generate_stable_id(self.repo_id, file_path, qname, "")
+                        symbols.append({
+                            "stable_id": stable_id,
+                            "file_id": f"{self.repo_id}:{file_path}",
+                            "name": name,
+                            "qualified_name": qname,
+                            "symbol_type": sym_type_str,
+                            "line_start": sym.get("line", 1),
+                            "line_end": sym.get("line", 1),
+                            "signature_hash": "",
+                            "metadata": {}
+                        })
+        return symbols

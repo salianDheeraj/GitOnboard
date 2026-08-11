@@ -56,8 +56,6 @@ class PythonCallGraphVisitor(ast.NodeVisitor):
                 callee_name = node.func.attr
                 
             if callee_name:
-                # Without full type inference, we guess the callee ID. 
-                # A robust call graph analyzer would check imports and scope.
                 callee_id = generate_entity_id(EntityType.FUNCTION, self.file_path, callee_name)
                 
                 rel = Relationship(
@@ -76,6 +74,10 @@ class CallGraphAnalyzer(BaseAnalyzer):
     name = "CallGraphAnalyzer"
     supported_languages = ["Python"]
 
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
+
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
             if parsed.language not in self.supported_languages or not parsed.ast:
@@ -85,7 +87,24 @@ class CallGraphAnalyzer(BaseAnalyzer):
             visitor.visit(parsed.ast)
             
             for rel in visitor.relationships:
-                # In a strict environment, we'd ensure target_id exists in repository.entities.
-                # Since cross-file calls are hard to resolve perfectly without a binder, 
-                # we just insert the relationship. 
                 repository.relationships[rel.id] = rel
+
+    def extract_relationships(self, asts, symbols: list[dict] = None) -> list[dict]:
+        relationships = []
+        if isinstance(asts, dict):
+            for file_path, parsed in asts.items():
+                if parsed.language == "Python" and parsed.ast:
+                    visitor = PythonCallGraphVisitor(file_path)
+                    visitor.visit(parsed.ast)
+                    for rel in visitor.relationships:
+                        rel_type_str = rel.type.value if hasattr(rel.type, "value") else str(rel.type)
+                        relationships.append({
+                            "id": rel.id,
+                            "from_symbol_id": rel.source_id,
+                            "to_symbol_id": rel.target_id,
+                            "rel_type": rel_type_str,
+                            "evidence_line": None,
+                            "evidence_snippet": rel.metadata.get("call_name") if rel.metadata else None,
+                            "status": "CONFIRMED"
+                        })
+        return relationships
