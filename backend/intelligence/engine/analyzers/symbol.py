@@ -20,13 +20,14 @@ from ...rim.identity import generate_entity_id, generate_relationship_id
 # --------------------------------------------------------------------------- #
 
 class PythonSymbolVisitor(ast.NodeVisitor):
-    def __init__(self, file_path: str, source: str):
+    def __init__(self, file_path: str, source: str, repo_id: str = ""):
         self.file_path = file_path
         self.source_lines = source.splitlines()
+        self.repo_id = repo_id
         self.entities: List[Entity] = []
         self.relationships: List[Relationship] = []
         self.namespace_stack: List[tuple] = []
-        self.file_id = generate_entity_id(EntityType.FILE, self.file_path, self.file_path)
+        self.file_id = generate_entity_id(EntityType.FILE, self.file_path, self.file_path, repo_id=self.repo_id)
 
     def _get_qualified_name(self, name: str) -> str:
         parts = []
@@ -52,12 +53,12 @@ class PythonSymbolVisitor(ast.NodeVisitor):
 
     def _add_entity_and_rel(self, node: ast.AST, name: str, entity_type: EntityType):
         qname = self._get_qualified_name(name)
-        ent_id = generate_entity_id(entity_type, self.file_path, qname)
+        ent_id = generate_entity_id(entity_type, self.file_path, qname, repo_id=self.repo_id)
 
         if self.namespace_stack:
             parent_qname = self._get_qualified_name("")
             _, parent_type = self.namespace_stack[-1]
-            parent_id = generate_entity_id(parent_type, self.file_path, parent_qname)
+            parent_id = generate_entity_id(parent_type, self.file_path, parent_qname, repo_id=self.repo_id)
         else:
             parent_id = self.file_id
 
@@ -110,6 +111,7 @@ def _process_synthetic_ast(
     parsed: ParsedFile,
     repository: RepositoryModel,
     file_id: str,
+    repo_id: str = "",
 ):
     """Process a synthetic AST dict (TypeScript/JavaScript/Java) and populate the RIM."""
     ast_data = parsed.ast  # dict produced by TypeScript/Java provider
@@ -138,7 +140,7 @@ def _process_synthetic_ast(
         module_path = file_path.rsplit(".", 1)[0].replace("/", ".")
         qname = f"{module_path}.{name}"
 
-        ent_id = generate_entity_id(entity_type, file_path, qname)
+        ent_id = generate_entity_id(entity_type, file_path, qname, repo_id=repo_id)
         if ent_id in repository.entities:
             continue
 
@@ -188,7 +190,7 @@ class SymbolAnalyzer(BaseAnalyzer):
                 continue
 
             # Ensure FILE entity
-            file_id = generate_entity_id(EntityType.FILE, file_path, file_path)
+            file_id = generate_entity_id(EntityType.FILE, file_path, file_path, repo_id=self.repo_id)
             if file_id not in repository.entities:
                 repository.entities[file_id] = Entity(
                     id=file_id,
@@ -207,7 +209,7 @@ class SymbolAnalyzer(BaseAnalyzer):
             # Ensure DIRECTORY entities
             dir_path = str(Path(file_path).parent).replace("\\", "/")
             if dir_path and dir_path != ".":
-                dir_id = generate_entity_id(EntityType.DIRECTORY, dir_path, dir_path)
+                dir_id = generate_entity_id(EntityType.DIRECTORY, dir_path, dir_path, repo_id=self.repo_id)
                 if dir_id not in repository.entities:
                     repository.entities[dir_id] = Entity(
                         id=dir_id,
@@ -224,7 +226,7 @@ class SymbolAnalyzer(BaseAnalyzer):
                     )
 
             if parsed.language == "Python" and parsed.ast is not None:
-                visitor = PythonSymbolVisitor(file_path, parsed.source)
+                visitor = PythonSymbolVisitor(file_path, parsed.source, repo_id=self.repo_id)
                 visitor.visit(parsed.ast)
                 for ent in visitor.entities:
                     ent.metadata["file_id"] = file_path
@@ -232,14 +234,14 @@ class SymbolAnalyzer(BaseAnalyzer):
                 for rel in visitor.relationships:
                     repository.relationships[rel.id] = rel
             else:
-                _process_synthetic_ast(file_path, parsed, repository, file_id)
+                _process_synthetic_ast(file_path, parsed, repository, file_id, repo_id=self.repo_id)
 
     def extract_symbols(self, asts) -> list[dict]:
         symbols = []
         if isinstance(asts, dict):
             for file_path, parsed in asts.items():
                 if parsed.language == "Python" and parsed.ast:
-                    visitor = PythonSymbolVisitor(file_path, parsed.source)
+                    visitor = PythonSymbolVisitor(file_path, parsed.source, repo_id=self.repo_id)
                     visitor.visit(parsed.ast)
                     for ent in visitor.entities:
                         sig_hash = ent.metadata.get("signature_hash", "")

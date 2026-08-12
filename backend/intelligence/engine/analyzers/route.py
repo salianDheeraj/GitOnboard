@@ -7,14 +7,25 @@ from ...rim.entity import Entity
 from ...rim.relationship import Relationship
 from ...rim.enums import EntityType, RelationshipType
 from ...rim.location import SourceLocation
-from ...rim.identity import generate_entity_id, generate_relationship_id
-from backend.intelligence.rim.identity import generate_stable_id
+from ...rim.identity import generate_entity_id, generate_relationship_id, generate_stable_id
 
 class PythonRouteVisitor(ast.NodeVisitor):
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, repo_id: str = ""):
         self.file_path = file_path
+        self.repo_id = repo_id
         self.entities: List[Entity] = []
         self.relationships: List[Relationship] = []
+
+    def _get_qualified_name(self, name: str) -> str:
+        parts = []
+        module_path = self.file_path.replace("/", ".").replace(".py", "")
+        if module_path.endswith(".__init__"):
+            module_path = module_path[:-9]
+        if module_path:
+            parts.append(module_path)
+        if name:
+            parts.append(name)
+        return ".".join(parts)
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         for decorator in node.decorator_list:
@@ -32,7 +43,7 @@ class PythonRouteVisitor(ast.NodeVisitor):
                         path = arg.value
                         
                         route_name = f"{method} {path}"
-                        route_id = generate_entity_id(EntityType.ROUTE, self.file_path, route_name)
+                        route_id = generate_stable_id(self.repo_id, self.file_path, f"route:{method}:{path}", "")
                         
                         self.entities.append(Entity(
                             id=route_id,
@@ -47,9 +58,8 @@ class PythonRouteVisitor(ast.NodeVisitor):
                             metadata={"method": method, "path": path, "framework": "FastAPI/Flask"}
                         ))
                         
-                        # Assuming the function ID
-                        func_qname = node.name # Simplification, ignoring class nesting
-                        func_id = generate_entity_id(EntityType.FUNCTION, self.file_path, func_qname)
+                        func_qname = self._get_qualified_name(node.name)
+                        func_id = generate_stable_id(self.repo_id, self.file_path, func_qname, "")
                         
                         self.relationships.append(Relationship(
                             id=generate_relationship_id(RelationshipType.EXPOSES, func_id, route_id),
@@ -76,7 +86,7 @@ class RouteAnalyzer(BaseAnalyzer):
         for file_path, parsed in asts.items():
             if parsed.language not in self.supported_languages or not parsed.ast:
                 continue
-            visitor = PythonRouteVisitor(file_path)
+            visitor = PythonRouteVisitor(file_path, repo_id=self.repo_id)
             visitor.visit(parsed.ast)
             for ent in visitor.entities:
                 repository.entities[ent.id] = ent
@@ -85,10 +95,17 @@ class RouteAnalyzer(BaseAnalyzer):
 
     def extract_routes(self, asts, symbols: list[dict] = None) -> list[dict]:
         routes = []
+        symbol_map = {}
+        if symbols:
+            for s in symbols:
+                file_p = s.get("file_id", "").split(":", 1)[-1]
+                symbol_map[(file_p, s.get("qualified_name"))] = s.get("stable_id")
+                symbol_map[(file_p, s.get("name"))] = s.get("stable_id")
+
         if isinstance(asts, dict):
             for file_path, parsed in asts.items():
                 if parsed.language == "Python" and parsed.ast:
-                    visitor = PythonRouteVisitor(file_path)
+                    visitor = PythonRouteVisitor(file_path, repo_id=self.repo_id)
                     visitor.visit(parsed.ast)
                     for ent in visitor.entities:
                         if ent.type == EntityType.ROUTE:
@@ -100,6 +117,12 @@ class RouteAnalyzer(BaseAnalyzer):
                                     handler_symbol_id = rel.source_id
                                     break
                             
+                            # If symbols dict provides a direct match for this handler, prefer symbol_map
+                            func_name = ent.name.split()[-1] if " " in ent.name else ""
+                            matched_id = symbol_map.get((file_path, func_name)) or symbol_map.get((file_path, handler_symbol_id))
+                            if matched_id:
+                                handler_symbol_id = matched_id
+
                             route_id = generate_stable_id(self.repo_id, file_path, f"route:{method}:{path}", "")
                             routes.append({
                                 "id": route_id,
@@ -109,3 +132,4 @@ class RouteAnalyzer(BaseAnalyzer):
                                 "handler_symbol_id": handler_symbol_id
                             })
         return routes
+

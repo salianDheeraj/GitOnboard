@@ -77,7 +77,7 @@ class AnalysisWorker(WorkerInterface):
 
                 # 2. Analyze
                 def run_analysis():
-                    from backend.intelligence.engine.orchestration.pipeline import AnalysisEngine
+                    from backend.intelligence.engine.orchestration.pipeline import AnalysisEngine, AnalysisPipeline
                     from backend.intelligence.engine.analyzers import get_default_registry
                     from backend.intelligence.patterns.engine import PatternRecognitionEngine
                     from backend.intelligence.patterns.registry import PatternRegistry
@@ -85,20 +85,24 @@ class AnalysisWorker(WorkerInterface):
                     from backend.intelligence.features.engine import FeatureReconstructionEngine
                     from backend.intelligence.rim.serialization import serialize_rim
                     
-                    # Run Phase 2 Static Analysis Pipeline
+                    # 1. Run Canonical Fact Store Persistence Pipeline
+                    pipeline = AnalysisPipeline(db)
+                    pipeline.run_analysis(str(repo.id), str(target_dir))
+
+                    # 2. Run Phase 2 Static Analysis Pipeline
                     engine = AnalysisEngine(str(target_dir), get_default_registry())
                     model = engine.run(repo_name)
                     
-                    # Run Phase 3 Pattern Recognition Engine
+                    # 3. Run Phase 3 Pattern Recognition Engine
                     pattern_registry = PatternRegistry()
                     pattern_engine = PatternRecognitionEngine(pattern_registry)
                     model = pattern_engine.run(model)
                     
-                    # Run Phase 4 Capability Engine
+                    # 4. Run Phase 4 Capability Engine
                     capability_engine = CapabilityBuilderEngine()
                     model = capability_engine.run(model)
                     
-                    # Run Phase 5 Feature Reconstruction Engine
+                    # 5. Run Phase 5 Feature Reconstruction Engine
                     feature_engine = FeatureReconstructionEngine()
                     model = feature_engine.run(model)
                     

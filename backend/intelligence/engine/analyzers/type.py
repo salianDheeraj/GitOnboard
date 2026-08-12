@@ -7,9 +7,19 @@ from ...rim.relationship import Relationship
 from ...rim.enums import EntityType, RelationshipType
 from ...rim.identity import generate_entity_id, generate_relationship_id
 
+import ast
+from typing import Dict, List
+from .base import BaseAnalyzer
+from ..parser.providers.base import ParsedFile
+from ...rim.repository import RepositoryModel
+from ...rim.relationship import Relationship
+from ...rim.enums import EntityType, RelationshipType
+from ...rim.identity import generate_entity_id, generate_relationship_id
+
 class PythonTypeVisitor(ast.NodeVisitor):
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, repo_id: str = ""):
         self.file_path = file_path
+        self.repo_id = repo_id
         self.relationships: List[Relationship] = []
         self.namespace_stack: List[str] = []
         
@@ -26,14 +36,12 @@ class PythonTypeVisitor(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef):
         class_qname = self._get_qualified_name(node.name)
-        class_id = generate_entity_id(EntityType.CLASS, self.file_path, class_qname)
+        class_id = generate_entity_id(EntityType.CLASS, self.file_path, class_qname, repo_id=self.repo_id)
         
         for base in node.bases:
             if isinstance(base, ast.Name):
                 base_name = base.id
-                # Heuristically assume the base is in the same file or a known import
-                # A true type resolver would find where `base_name` was imported from.
-                base_id = generate_entity_id(EntityType.CLASS, self.file_path, base_name)
+                base_id = generate_entity_id(EntityType.CLASS, self.file_path, base_name, repo_id=self.repo_id)
                 
                 rel = Relationship(
                     id=generate_relationship_id(RelationshipType.INHERITS, class_id, base_id),
@@ -52,15 +60,18 @@ class TypeAnalyzer(BaseAnalyzer):
     name = "TypeAnalyzer"
     supported_languages = ["Python"]
 
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
+
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
             if parsed.language not in self.supported_languages or not parsed.ast:
                 continue
                 
-            visitor = PythonTypeVisitor(file_path)
+            visitor = PythonTypeVisitor(file_path, repo_id=self.repo_id)
             visitor.visit(parsed.ast)
             
             for rel in visitor.relationships:
-                # We do not create dummy class entities here because we don't know where they live
-                # if they are external. If they are local, SymbolAnalyzer should have created them.
                 repository.relationships[rel.id] = rel
+

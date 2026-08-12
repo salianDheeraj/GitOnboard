@@ -13,6 +13,10 @@ class DependencyAnalyzer(BaseAnalyzer):
     name = "DependencyAnalyzer"
     supported_languages = ["JSON", "TOML", "XML", "Python"]
 
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
+
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
             if file_path.endswith("package.json"):
@@ -21,7 +25,7 @@ class DependencyAnalyzer(BaseAnalyzer):
                 self._analyze_requirements_txt(repository, parsed)
 
     def _add_dependency(self, repository: RepositoryModel, parsed: ParsedFile, source_pkg_id: str, dep_name: str, version: str):
-        dep_id = generate_entity_id(EntityType.DEPENDENCY, parsed.file_path, dep_name)
+        dep_id = generate_entity_id(EntityType.DEPENDENCY, parsed.file_path, dep_name, repo_id=self.repo_id)
         
         if dep_id not in repository.entities:
             repository.entities[dep_id] = Entity(
@@ -44,7 +48,7 @@ class DependencyAnalyzer(BaseAnalyzer):
         try:
             data = json.loads(parsed.source)
             pkg_name = data.get("name", "unknown_package")
-            pkg_id = generate_entity_id(EntityType.PACKAGE, parsed.file_path, pkg_name)
+            pkg_id = generate_entity_id(EntityType.PACKAGE, parsed.file_path, pkg_name, repo_id=self.repo_id)
             
             deps = data.get("dependencies", {})
             dev_deps = data.get("devDependencies", {})
@@ -57,7 +61,7 @@ class DependencyAnalyzer(BaseAnalyzer):
             pass
 
     def _analyze_requirements_txt(self, repository: RepositoryModel, parsed: ParsedFile):
-        pkg_id = generate_entity_id(EntityType.PACKAGE, parsed.file_path, "python_package")
+        pkg_id = generate_entity_id(EntityType.PACKAGE, parsed.file_path, "python_package", repo_id=self.repo_id)
         
         for line in parsed.source.splitlines():
             line = line.strip()
@@ -66,3 +70,4 @@ class DependencyAnalyzer(BaseAnalyzer):
                 
             dep_name = line.split("==")[0].split(">=")[0].strip()
             self._add_dependency(repository, parsed, pkg_id, dep_name, line)
+

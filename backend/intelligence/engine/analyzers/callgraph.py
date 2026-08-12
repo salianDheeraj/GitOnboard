@@ -5,11 +5,13 @@ from ..parser.providers.base import ParsedFile
 from ...rim.repository import RepositoryModel
 from ...rim.relationship import Relationship
 from ...rim.enums import EntityType, RelationshipType
-from ...rim.identity import generate_entity_id, generate_relationship_id
+from ...rim.identity import generate_entity_id, generate_relationship_id, generate_stable_id
 
 class PythonCallGraphVisitor(ast.NodeVisitor):
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, repo_id: str = "", symbol_map: dict = None):
         self.file_path = file_path
+        self.repo_id = repo_id
+        self.symbol_map = symbol_map or {}
         self.relationships: List[Relationship] = []
         self.current_caller_id: str = None
         self.namespace_stack: List[str] = []
@@ -31,9 +33,11 @@ class PythonCallGraphVisitor(ast.NodeVisitor):
         self.namespace_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        entity_type = EntityType.METHOD if self.namespace_stack else EntityType.FUNCTION
         qname = self._get_qualified_name(node.name)
-        caller_id = generate_entity_id(entity_type, self.file_path, qname)
+        # Check symbol map first or generate stable ID
+        caller_id = self.symbol_map.get((self.file_path, qname)) or self.symbol_map.get((self.file_path, node.name))
+        if not caller_id:
+            caller_id = generate_stable_id(self.repo_id, self.file_path, qname, "")
         
         prev_caller = self.current_caller_id
         self.current_caller_id = caller_id
@@ -56,7 +60,12 @@ class PythonCallGraphVisitor(ast.NodeVisitor):
                 callee_name = node.func.attr
                 
             if callee_name:
-                callee_id = generate_entity_id(EntityType.FUNCTION, self.file_path, callee_name)
+                callee_id = self.symbol_map.get((self.file_path, callee_name))
+                if not callee_id:
+                    callee_id = self.symbol_map.get(callee_name)
+                if not callee_id:
+                    callee_qname = self._get_qualified_name(callee_name)
+                    callee_id = generate_stable_id(self.repo_id, self.file_path, callee_qname, "")
                 
                 rel = Relationship(
                     id=generate_relationship_id(RelationshipType.CALLS, self.current_caller_id, callee_id),
@@ -83,7 +92,7 @@ class CallGraphAnalyzer(BaseAnalyzer):
             if parsed.language not in self.supported_languages or not parsed.ast:
                 continue
                 
-            visitor = PythonCallGraphVisitor(file_path)
+            visitor = PythonCallGraphVisitor(file_path, repo_id=self.repo_id)
             visitor.visit(parsed.ast)
             
             for rel in visitor.relationships:
@@ -91,10 +100,24 @@ class CallGraphAnalyzer(BaseAnalyzer):
 
     def extract_relationships(self, asts, symbols: list[dict] = None) -> list[dict]:
         relationships = []
+        symbol_map = {}
+        if symbols:
+            for s in symbols:
+                file_p = s.get("file_id", "").split(":", 1)[-1]
+                st_id = s.get("stable_id")
+                qname = s.get("qualified_name")
+                name = s.get("name")
+                if file_p and qname:
+                    symbol_map[(file_p, qname)] = st_id
+                if file_p and name:
+                    symbol_map[(file_p, name)] = st_id
+                if name and name not in symbol_map:
+                    symbol_map[name] = st_id
+
         if isinstance(asts, dict):
             for file_path, parsed in asts.items():
                 if parsed.language == "Python" and parsed.ast:
-                    visitor = PythonCallGraphVisitor(file_path)
+                    visitor = PythonCallGraphVisitor(file_path, repo_id=self.repo_id, symbol_map=symbol_map)
                     visitor.visit(parsed.ast)
                     for rel in visitor.relationships:
                         rel_type_str = rel.type.value if hasattr(rel.type, "value") else str(rel.type)
@@ -108,3 +131,4 @@ class CallGraphAnalyzer(BaseAnalyzer):
                             "status": "CONFIRMED"
                         })
         return relationships
+

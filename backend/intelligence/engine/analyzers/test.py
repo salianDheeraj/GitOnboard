@@ -10,15 +10,15 @@ from ...rim.location import SourceLocation
 from ...rim.identity import generate_entity_id, generate_relationship_id
 
 class PythonTestVisitor(ast.NodeVisitor):
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, repo_id: str = ""):
         self.file_path = file_path
+        self.repo_id = repo_id
         self.entities: List[Entity] = []
         self.relationships: List[Relationship] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        # A simple heuristic for python tests
         if node.name.startswith("test_"):
-            test_id = generate_entity_id(EntityType.TEST_CASE, self.file_path, node.name)
+            test_id = generate_entity_id(EntityType.TEST_CASE, self.file_path, node.name, repo_id=self.repo_id)
             
             self.entities.append(Entity(
                 id=test_id,
@@ -28,25 +28,26 @@ class PythonTestVisitor(ast.NodeVisitor):
                 metadata={}
             ))
             
-            # Simple heuristic: if it calls something, it's probably testing it
-            # A real test analyzer might look for `patch` or assert statements
-            # We'll just extract the entity for now.
-            
         self.generic_visit(node)
 
 class TestAnalyzer(BaseAnalyzer):
     name = "TestAnalyzer"
     supported_languages = ["Python"]
 
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
+
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
             if parsed.language not in self.supported_languages or not parsed.ast:
                 continue
                 
-            visitor = PythonTestVisitor(file_path)
+            visitor = PythonTestVisitor(file_path, repo_id=self.repo_id)
             visitor.visit(parsed.ast)
             
             for ent in visitor.entities:
                 repository.entities[ent.id] = ent
             for rel in visitor.relationships:
                 repository.relationships[rel.id] = rel
+

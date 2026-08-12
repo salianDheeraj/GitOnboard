@@ -9,15 +9,25 @@ from ...rim.enums import EntityType, RelationshipType
 from ...rim.location import SourceLocation
 from ...rim.identity import generate_entity_id, generate_relationship_id
 
+import ast
+from typing import Dict, List
+from .base import BaseAnalyzer
+from ..parser.providers.base import ParsedFile
+from ...rim.repository import RepositoryModel
+from ...rim.entity import Entity
+from ...rim.relationship import Relationship
+from ...rim.enums import EntityType, RelationshipType
+from ...rim.location import SourceLocation
+from ...rim.identity import generate_entity_id, generate_relationship_id
+
 class PythonDatabaseVisitor(ast.NodeVisitor):
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, repo_id: str = ""):
         self.file_path = file_path
+        self.repo_id = repo_id
         self.entities: List[Entity] = []
         self.relationships: List[Relationship] = []
 
     def visit_ClassDef(self, node: ast.ClassDef):
-        # Extremely simplistic heuristic: SQLAlchemy classes usually inherit from Base, Model, etc.
-        # Or have __tablename__
         is_model = False
         table_name = node.name.lower() + "s"
         
@@ -30,7 +40,7 @@ class PythonDatabaseVisitor(ast.NodeVisitor):
                             table_name = item.value.value
                             
         if is_model:
-            table_id = generate_entity_id(EntityType.TABLE, "database", table_name)
+            table_id = generate_entity_id(EntityType.TABLE, "database", table_name, repo_id=self.repo_id)
             
             self.entities.append(Entity(
                 id=table_id,
@@ -40,7 +50,7 @@ class PythonDatabaseVisitor(ast.NodeVisitor):
                 metadata={"orm_class": node.name}
             ))
             
-            class_id = generate_entity_id(EntityType.CLASS, self.file_path, node.name) # simplified
+            class_id = generate_entity_id(EntityType.CLASS, self.file_path, node.name, repo_id=self.repo_id)
             self.relationships.append(Relationship(
                 id=generate_relationship_id(RelationshipType.USES, class_id, table_id),
                 type=RelationshipType.USES,
@@ -55,15 +65,20 @@ class DatabaseAnalyzer(BaseAnalyzer):
     name = "DatabaseAnalyzer"
     supported_languages = ["Python"]
 
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
+
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
             if parsed.language not in self.supported_languages or not parsed.ast:
                 continue
                 
-            visitor = PythonDatabaseVisitor(file_path)
+            visitor = PythonDatabaseVisitor(file_path, repo_id=self.repo_id)
             visitor.visit(parsed.ast)
             
             for ent in visitor.entities:
                 repository.entities[ent.id] = ent
             for rel in visitor.relationships:
                 repository.relationships[rel.id] = rel
+

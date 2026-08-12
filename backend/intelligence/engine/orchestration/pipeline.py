@@ -43,7 +43,7 @@ class AnalysisEngine:
         from ...rim.identity import generate_entity_id
 
         for repo_file in manifest.files:
-            file_id = generate_entity_id(EntityType.FILE, repo_file.path, repo_file.path)
+            file_id = generate_entity_id(EntityType.FILE, repo_file.path, repo_file.path, repo_id=repo_name)
             if file_id not in model.entities:
                 full_p = Path(self.target_dir) / repo_file.path
                 line_count = 0

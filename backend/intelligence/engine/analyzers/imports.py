@@ -7,15 +7,23 @@ from ...rim.relationship import Relationship
 from ...rim.enums import EntityType, RelationshipType
 from ...rim.identity import generate_entity_id, generate_relationship_id
 
+import ast
+from typing import Dict, List, Optional
+from .base import BaseAnalyzer
+from ..parser.providers.base import ParsedFile
+from ...rim.repository import RepositoryModel
+from ...rim.relationship import Relationship
+from ...rim.enums import EntityType, RelationshipType
+from ...rim.identity import generate_entity_id, generate_relationship_id
+
 class PythonImportVisitor(ast.NodeVisitor):
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, repo_id: str = ""):
         self.file_path = file_path
+        self.repo_id = repo_id
         self.relationships: List[Relationship] = []
-        self.file_id = generate_entity_id(EntityType.FILE, self.file_path, self.file_path)
+        self.file_id = generate_entity_id(EntityType.FILE, self.file_path, self.file_path, repo_id=self.repo_id)
 
     def _resolve_module_path(self, module_name: str, level: int = 0) -> str:
-        # Simplistic resolution for now. 
-        # A true resolve requires checking repository structure to see if it's local.
         if level > 0:
             parts = self.file_path.split("/")[:-level]
             if module_name:
@@ -25,8 +33,7 @@ class PythonImportVisitor(ast.NodeVisitor):
 
     def visit_Import(self, node: ast.Import):
         for alias in node.names:
-            # We don't resolve external imports properly yet, just mark dependency on module
-            mod_id = generate_entity_id(EntityType.MODULE, self.file_path, alias.name)
+            mod_id = generate_entity_id(EntityType.MODULE, self.file_path, alias.name, repo_id=self.repo_id)
             rel = Relationship(
                 id=generate_relationship_id(RelationshipType.IMPORTS, self.file_id, mod_id),
                 type=RelationshipType.IMPORTS,
@@ -39,7 +46,7 @@ class PythonImportVisitor(ast.NodeVisitor):
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
         if node.module:
-            mod_id = generate_entity_id(EntityType.MODULE, self.file_path, node.module)
+            mod_id = generate_entity_id(EntityType.MODULE, self.file_path, node.module, repo_id=self.repo_id)
             rel = Relationship(
                 id=generate_relationship_id(RelationshipType.IMPORTS, self.file_id, mod_id),
                 type=RelationshipType.IMPORTS,
@@ -54,28 +61,31 @@ class ImportAnalyzer(BaseAnalyzer):
     name = "ImportAnalyzer"
     supported_languages = ["Python", "TypeScript", "JavaScript", "Java"]
 
+    def __init__(self, repo_id: str = "", file_path: str = ""):
+        self.repo_id = repo_id
+        self.file_path = file_path
+
     def analyze(self, repository: RepositoryModel, asts: Dict[str, ParsedFile]) -> None:
         for file_path, parsed in asts.items():
             if parsed.language not in self.supported_languages or not parsed.ast:
                 continue
 
             if parsed.language == "Python":
-                visitor = PythonImportVisitor(file_path)
+                visitor = PythonImportVisitor(file_path, repo_id=self.repo_id)
                 visitor.visit(parsed.ast)
                 for rel in visitor.relationships:
                     self._ensure_target(repository, rel, parsed.language)
                     repository.relationships[rel.id] = rel
             else:
-                # Synthetic AST from TS/JS/Java providers
                 ast_data = parsed.ast
                 if not isinstance(ast_data, dict):
                     continue
-                file_id = generate_entity_id(EntityType.FILE, file_path, file_path)
+                file_id = generate_entity_id(EntityType.FILE, file_path, file_path, repo_id=self.repo_id)
                 for imp in ast_data.get("imports", []):
                     module = imp.get("module", "")
                     if not module:
                         continue
-                    mod_id = generate_entity_id(EntityType.MODULE, file_path, module)
+                    mod_id = generate_entity_id(EntityType.MODULE, file_path, module, repo_id=self.repo_id)
                     rel = Relationship(
                         id=generate_relationship_id(RelationshipType.IMPORTS, file_id, mod_id),
                         type=RelationshipType.IMPORTS,
@@ -96,3 +106,4 @@ class ImportAnalyzer(BaseAnalyzer):
                 name=rel.metadata.get("module", "unknown"),
                 location=SourceLocation(repository_path="external", start_line=1, end_line=1, language=language)
             )
+
