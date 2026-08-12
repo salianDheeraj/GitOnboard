@@ -91,3 +91,60 @@ def test_intelligence_endpoints_require_auth_and_ownership(db):
     assert data["name"] == "test_func"
 
     app.dependency_overrides.clear()
+
+
+def test_fact_store_batching(db):
+    from backend.intelligence.store.fact_store import FactStore
+    from backend.models.fact_store import SymbolRecord
+
+    store = FactStore(db)
+    # Generate 550 test symbols across multiple batch boundaries (BATCH_SIZE = 500)
+    symbols = [
+        {
+            "stable_id": f"sym_batch_{i}",
+            "file_id": f"file_{i}",
+            "name": f"func_{i}",
+            "qualified_name": f"mod.func_{i}",
+            "symbol_type": "function",
+            "line_start": 1,
+            "line_end": 10
+        }
+        for i in range(550)
+    ]
+    store.save_symbols(symbols)
+
+    count = db.query(SymbolRecord).count()
+    assert count == 550
+
+    # Re-save updated batch to verify merge handling
+    symbols[0]["name"] = "updated_func_0"
+    store.save_symbols(symbols[:10])
+
+    updated_sym = db.query(SymbolRecord).filter(SymbolRecord.id == "sym_batch_0").first()
+    assert updated_sym.name == "updated_func_0"
+
+
+def test_llm_service_failure_fallback():
+    from backend.llm_service import LLMService, EvidenceBackedAIPipeline
+    from unittest.mock import MagicMock
+
+    # Point to invalid port to simulate connection failure
+    svc = LLMService(base_url="http://127.0.0.1:99999")
+    
+    # 1. Summary fallback
+    meta = {"repository": {"name": "TestRepo"}, "statistics": {"files": 42}}
+    summary = svc.generate_summary(meta)
+    assert "TestRepo — Repository Summary" in summary
+
+    # 2. Explanation fallback
+    exp = svc.generate_explanation("Explain this feature")
+    assert "Generated explanation grounded in AST-bounded source code" in exp
+
+    # 3. Pipeline fallback
+    mock_db = MagicMock()
+    mock_db.query.return_value.all.return_value = []
+    pipeline = EvidenceBackedAIPipeline(mock_db, "repo1")
+    resp = pipeline.process_user_query("What does symbol 070589889afe6051d846bc77b4e2607f do?")
+    assert "explanation" in resp
+    assert isinstance(resp["explanation"], str)
+

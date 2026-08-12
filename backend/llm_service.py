@@ -105,11 +105,27 @@ class EvidenceBackedAIPipeline:
         return "EXPLAIN_SYMBOL", target_id
 
     def _extract_id(self, query: str) -> str:
+        import re
+        # 1. Match 32 or 64 char hex hash (standalone word or surrounded by punctuation)
+        hex_match = re.search(r'\b[a-fA-F0-9]{32}(?:[a-fA-F0-9]{32})?\b', query)
+        if hex_match:
+            return hex_match.group(0)
+
+        # 2. Match prefixed IDs (e.g., rel:..., route:..., urn:..., sym:..., cap:...)
+        prefixed_match = re.search(r'\b(?:rel|route|urn|sym|cap):[^\s,;()"\']+', query, re.IGNORECASE)
+        if prefixed_match:
+            return prefixed_match.group(0).rstrip('.,;:()[]{}<>?!\'"`')
+
+        # 3. Fallback: inspect tokens stripped of surrounding punctuation
         words = query.split()
         for word in words:
-            if len(word) == 32:  # Hash ID length
-                return word
+            cleaned = word.strip('.,;:()[]{}<>"\'`?')
+            if len(cleaned) == 32 and all(c in "0123456789abcdefABCDEF" for c in cleaned):
+                return cleaned
+            if any(cleaned.lower().startswith(p) for p in ("rel:", "route:", "urn:", "sym:", "cap:")):
+                return cleaned
         return ""
+
 
     def _build_ast_prompt(self, query: str, evidence: Dict[str, Any]) -> str:
         snippets_str = "\n\n".join(evidence.get("code_snippets", []))
@@ -130,8 +146,8 @@ Provide a clear, accurate explanation referencing exact line numbers and symbol 
 """
 
     def _call_llm(self, prompt: str) -> str:
-        # LLM integration point
-        return "Generated response grounded strictly in AST-bounded source code and NetworkX graph edges."
+        fallback = "Generated response grounded strictly in AST-bounded source code and NetworkX graph edges."
+        return llm_service._call_ollama(prompt, fallback)
 
 
 class LLMService:
@@ -142,13 +158,9 @@ class LLMService:
         self.base_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
         self.model = os.environ.get("OLLAMA_MODEL", "llama3.2")
 
-    def generate_summary(self, metadata: Dict[str, Any]) -> str:
-        repo_name = metadata.get("repository", {}).get("name", "Repository")
-        
-        # Try Ollama if available
+    def _call_ollama(self, prompt: str, default_fallback: str) -> str:
         try:
             import requests
-            prompt = self._build_prompt(metadata)
             url = f"{self.base_url}/api/generate"
             payload = {
                 "model": self.model,
@@ -161,8 +173,16 @@ class LLMService:
                 res_data = response.json()
                 if "response" in res_data and res_data["response"].strip():
                     return res_data["response"].strip()
-        except Exception:
-            pass
+            import logging
+            logging.getLogger(__name__).warning(f"Ollama returned non-200 status ({response.status_code}). Using fallback response.")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Ollama/LLM call failed ({type(e).__name__}: {e}). Using controlled fallback response.")
+        return default_fallback
+
+    def generate_summary(self, metadata: Dict[str, Any]) -> str:
+        repo_name = metadata.get("repository", {}).get("name", "Repository")
+        prompt = self._build_prompt(metadata)
 
         # Fallback deterministic markdown summary
         stats = metadata.get("statistics", {})
@@ -208,10 +228,12 @@ class LLMService:
                 ""
             ])
 
-        return "\n".join(md_lines)
+        fallback_summary = "\n".join(md_lines)
+        return self._call_ollama(prompt, fallback_summary)
 
     def generate_explanation(self, prompt: str) -> str:
-        return "Generated explanation grounded in AST-bounded source code and verified dependency graphs."
+        fallback = "Generated explanation grounded in AST-bounded source code and verified dependency graphs."
+        return self._call_ollama(prompt, fallback)
 
     def _build_prompt(self, metadata: dict) -> str:
         import json
@@ -227,4 +249,5 @@ Write a clear, concise Markdown summary:
 
 
 llm_service = LLMService()
+
 

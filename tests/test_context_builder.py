@@ -58,3 +58,22 @@ def test_context_builder_endpoint_returns_feature_and_graph_context(monkeypatch)
     assert payload["features"][0]["name"] == "Authentication"
     assert any(symbol["name"] == "login_user" for symbol in payload["matched_symbols"])
     assert len(payload["graph"]["nodes"]) >= 2
+
+
+def test_extract_id_robustness():
+    from backend.llm_service import EvidenceBackedAIPipeline
+    mock_db = MagicMock()
+    mock_db.query.return_value.all.return_value = []
+    pipeline = EvidenceBackedAIPipeline(mock_db, "repo1")
+
+    # 1. Plain 32-char hex hash
+    hex32 = "070589889afe6051d846bc77b4e2607f"
+    assert pipeline._extract_id(f"Trace {hex32}") == hex32
+
+    # 2. Hex hash with surrounding punctuation
+    assert pipeline._extract_id(f"What calls ({hex32})?") == hex32
+    assert pipeline._extract_id(f"Explain symbol '{hex32}'.") == hex32
+
+    # 3. Prefixed URN or route/rel IDs
+    assert pipeline._extract_id("What calls route:GET:/login?") == "route:GET:/login"
+    assert pipeline._extract_id("Trace urn:function:app.auth#login!") == "urn:function:app.auth#login"
