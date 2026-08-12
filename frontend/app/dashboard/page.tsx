@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { repositoryService } from '@/services/repository';
@@ -10,7 +10,7 @@ import { Card } from '@/components/common/Card';
 import { Badge } from '@/components/common/Badge';
 import { Plus, FolderGit2 } from 'lucide-react';
 
-export default function Dashboard() {
+function DashboardContent() {
   const [repos, setRepos] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -27,6 +27,7 @@ export default function Dashboard() {
       setRepos(data.repositories || []);
     } catch (err) {
       console.error("Failed to fetch repos", err);
+      setRepos([]);
     } finally {
       setIsLoading(false);
     }
@@ -232,5 +233,17 @@ export default function Dashboard() {
         </form>
       </Modal>
     </div>
+  );
+}
+
+export default function Dashboard() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center min-h-screen text-slate-500">
+        Loading Dashboard...
+      </div>
+    }>
+      <DashboardContent />
+    </Suspense>
   );
 }

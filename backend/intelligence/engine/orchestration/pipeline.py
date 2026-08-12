@@ -36,6 +36,38 @@ class AnalysisEngine:
             )
         )
         
+        # Pre-populate FILE entities for all scanned files
+        from ...rim.enums import EntityType
+        from ...rim.entity import Entity
+        from ...rim.location import SourceLocation
+        from ...rim.identity import generate_entity_id
+
+        for repo_file in manifest.files:
+            file_id = generate_entity_id(EntityType.FILE, repo_file.path, repo_file.path)
+            if file_id not in model.entities:
+                full_p = Path(self.target_dir) / repo_file.path
+                line_count = 0
+                if full_p.exists() and full_p.is_file():
+                    try:
+                        with open(full_p, "r", encoding="utf-8", errors="ignore") as fh:
+                            line_count = sum(1 for _ in fh)
+                    except Exception:
+                        line_count = 0
+
+                model.entities[file_id] = Entity(
+                    id=file_id,
+                    type=EntityType.FILE,
+                    name=repo_file.name,
+                    qualified_name=repo_file.path,
+                    location=SourceLocation(
+                        repository_path=repo_file.path,
+                        start_line=1,
+                        end_line=max(1, line_count),
+                        language=repo_file.language
+                    ),
+                    metadata={"size": repo_file.size, "is_supported": True}
+                )
+        
         # 2. Parse ASTs
         parser_manager = ASTParserManager(self.target_dir)
         asts = parser_manager.parse_manifest(manifest)

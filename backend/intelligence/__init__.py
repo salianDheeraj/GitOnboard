@@ -5,11 +5,14 @@ This package provides a centralized, read-only Repository Intelligence Model
 built via an extensible analysis pipeline.
 """
 
-from .repository_model import RepositoryModel
+from .rim.repository import RepositoryModel as _RimRepositoryModel
+from .rim_query_layer import QueryLayer
 from .pipeline import AnalysisPipeline
-from .query_layer import QueryLayer
 from .builder import RepositoryBuilder
 from .relationships import RelationshipBuilder
+
+# Expose the RIM RepositoryModel as the primary model type
+RepositoryModel = _RimRepositoryModel
 
 __all__ = [
     "RepositoryModel",

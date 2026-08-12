@@ -15,13 +15,15 @@ export default function RepositorySummary({ repoName }) {
   const fetchSummary = async () => {
     try {
       const res = await fetch(`/api/repos/${repoName}/summary`);
-      if (res.status === 404) return; // No analysis yet, valid state
+      if (res.status === 404) return;
       if (!res.ok) throw new Error("Failed to fetch summary");
       const data = await res.json();
-      setSummary(data.summary);
+      if (data.summary) {
+        setSummary(data.summary);
+        setLocalIsGenerating(false);
+      }
       setIsOutdated(data.outdated);
     } catch (err) {
-      // Only log truly unexpected errors, not missing summaries
       if (!err.message.includes("Failed to fetch summary")) {
         console.error(err);
       }
@@ -43,7 +45,6 @@ export default function RepositorySummary({ repoName }) {
       setLocalIsGenerating(false);
       setError("Summary generation failed. Please try again.");
     } else if (taskStatus === null && prevTaskStatus.current === 'processing') {
-      // Backend restarted or task was lost — reset the spinner
       setLocalIsGenerating(false);
     }
     prevTaskStatus.current = taskStatus;
@@ -57,17 +58,16 @@ export default function RepositorySummary({ repoName }) {
         method: 'POST'
       });
       if (!res.ok) throw new Error("Failed to generate summary");
-      const data = await res.json();
-      if (data.summary) {
-        setSummary(data.summary);
-      }
       setIsOutdated(false);
-      // Wait for the next poll of useTaskStatus to catch the 'processing' state
+      // Poll fetchSummary after 1s and 3s in case SSE is delayed
+      setTimeout(fetchSummary, 1000);
+      setTimeout(fetchSummary, 3000);
     } catch (err) {
       setError(err.message);
       setLocalIsGenerating(false);
     }
   };
+
 
   if (isGenerating) {
     return (
@@ -129,8 +129,15 @@ export default function RepositorySummary({ repoName }) {
       
       {/* Markdown Content */}
       <div className="flex-grow overflow-y-auto p-8 prose prose-blue max-w-none">
-        <ReactMarkdown>{summary}</ReactMarkdown>
+        <ReactMarkdown>
+          {typeof summary === 'string'
+            ? summary
+            : summary && typeof summary === 'object'
+              ? summary.overview || JSON.stringify(summary, null, 2)
+              : String(summary || '')}
+        </ReactMarkdown>
       </div>
     </div>
   );
 }
+

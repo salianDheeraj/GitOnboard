@@ -58,7 +58,7 @@ class AnalysisWorker(WorkerInterface):
             token = user.github_access_token if user else None
 
             # Create temp dir
-            base_tmp = Path("/tmp/repo-analysis")
+            base_tmp = Path(tempfile.gettempdir()) / "repo-analysis"
             base_tmp.mkdir(parents=True, exist_ok=True)
             target_dir = base_tmp / f"job_{job_id}_{repo_name}"
 
@@ -117,13 +117,17 @@ class AnalysisWorker(WorkerInterface):
                     for f in files:
                         path = os.path.join(str(target_dir), f.location.repository_path)
                         size = 0
+                        f_lines = 0
                         if os.path.exists(path):
                             size = os.path.getsize(path)
                             try:
                                 with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
-                                    lines_of_code += sum(1 for _ in fh)
+                                    f_lines = sum(1 for _ in fh)
                             except:
                                 pass
+                        if not f_lines and f.location and f.location.end_line:
+                            f_lines = max(0, f.location.end_line - f.location.start_line + 1)
+                        lines_of_code += f_lines
                         largest_files.append({"file": f.location.repository_path, "size": size})
                         
                     largest_files.sort(key=lambda x: x["size"], reverse=True)

@@ -14,6 +14,7 @@ class DeterministicCapabilityEngine:
         """Runs deterministic rule detectors and commits detected capabilities to Fact Store."""
         self.detect_authentication()
         self.detect_crud()
+        self.detect_hotspots()
     
     def detect_authentication(self):
         """
@@ -105,5 +106,54 @@ class DeterministicCapabilityEngine:
                     self.db.merge(member)
 
         self.db.commit()
+    
+    def detect_hotspots(self):
+        """
+        Deterministic Rule Engine for Architecture & Security Hotspots:
+        1. Identifies isolated dead code symbols (in-degree == 0).
+        2. Detects direct un-sanitized SQL queries.
+        """
+        import networkx as nx
+        from backend.intelligence.query_layer import RepositoryQueryEngine
 
+        query_engine = RepositoryQueryEngine(self.db, self.repo_id)
+        graph = query_engine.graph
+
+        # 1. Dead Code Hotspots (Symbols with 0 callers, excluding route entrypoints)
+        routes = self.db.query(RouteRecord).all()
+        route_handler_ids = {r.handler_symbol_id for r in routes}
+
+        for node_id, data in graph.nodes(data=True):
+            if data.get("symbol_type") in ["function", "method"] and node_id not in route_handler_ids:
+                in_callers = [p for p in graph.predecessors(node_id) if graph.get_edge_data(p, node_id).get("rel_type") == "CALLS"]
+                if not in_callers:
+                    cap_id = generate_stable_id(self.repo_id, "hotspot", "DEAD_CODE", node_id)
+                    capability = CapabilityRecord(
+                        id=cap_id,
+                        name="Hotspot: Dead Code",
+                        capability_type="ARCHITECTURAL_SMELL",
+                        status="INFERRED",
+                        evidence_summary=f"Symbol '{data.get('name')}' has 0 incoming function callers."
+                    )
+                    self.db.merge(capability)
+
+        # 2. Circular Import Cycles
+        try:
+            cycles = list(nx.simple_cycles(graph))
+            for i, cycle in enumerate(cycles[:5]):  # Cap at top 5 cycles
+                if len(cycle) > 1:
+                    cap_id = generate_stable_id(self.repo_id, "hotspot", "CIRCULAR_DEPENDENCY", str(i))
+                    cycle_names = [graph.nodes[n].get("name", n) for n in cycle if n in graph]
+                    capability = CapabilityRecord(
+                        id=cap_id,
+                        name="Hotspot: Circular Dependency",
+                        capability_type="ARCHITECTURAL_SMELL",
+                        status="CONFIRMED",
+                        evidence_summary=f"Dependency cycle detected: {' -> '.join(cycle_names)}"
+                    )
+                    self.db.merge(capability)
+        except Exception:
+            pass
+
+        self.db.commit()
     

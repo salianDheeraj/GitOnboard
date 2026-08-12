@@ -6,6 +6,8 @@ from pathlib import Path
 import shutil
 import asyncio
 
+import tempfile
+
 from backend.config import settings
 from backend.logger import setup_logging
 from backend.database import engine, Base, SessionLocal
@@ -28,7 +30,7 @@ worker = AnalysisWorker()
 repo_queue = InMemoryQueue(worker)
 
 def cleanup_tmp_dirs():
-    base_tmp = Path("/tmp/repo-analysis")
+    base_tmp = Path(tempfile.gettempdir()) / "repo-analysis"
     if base_tmp.exists() and base_tmp.is_dir():
         for child in base_tmp.iterdir():
             try:

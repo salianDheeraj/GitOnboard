@@ -194,32 +194,43 @@ def get_summary(repo_name: str, db: Session = Depends(get_db), current_user: Use
     if not summary_art:
         return {"summary": None, "outdated": False}
         
-    return {"summary": summary_art.data, "outdated": False}
+    summary_data = summary_art.data
+    if isinstance(summary_data, dict):
+        overview = summary_data.get("overview", "")
+        stats = summary_data.get("statistics", {})
+        arch = summary_data.get("architecture", {})
+        lines = [f"# {repo_name} Summary", "", overview, ""]
+        if stats:
+            lines.append("### Statistics")
+            for k, v in stats.items():
+                lines.append(f"- **{k.replace('_', ' ').title()}**: {v}")
+            lines.append("")
+        summary_data = "\n".join(lines)
+
+    return {"summary": summary_data, "outdated": False}
 
 @core_router.post("/{repo_name}/summary/generate")
 def generate_summary(repo_name: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    current_status = get_task_status(repo_name, "summary", current_user, db)
-    if current_status == "processing":
-        return {"status": "processing"}
-    
+    user_id = current_user.id
     set_task_status(repo_name, "summary", "processing", current_user, db)
     
     def background_generate_summary():
-        # Get a new DB session for the background thread
         from backend.database import SessionLocal
         bg_db = SessionLocal()
+        bg_user = None
         try:
             from backend.llm_service import llm_service
-            query_layer = get_or_build_model(repo_name, bg_db, current_user)
-            
-            repo, analysis = get_latest_analysis(repo_name, bg_db, current_user)
+            bg_user = bg_db.query(User).filter(User.id == user_id).first()
+            if not bg_user:
+                return
+
+            query_layer = get_or_build_model(repo_name, bg_db, bg_user)
+            repo, analysis = get_latest_analysis(repo_name, bg_db, bg_user)
             em_art = bg_db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "enriched_metadata").first()
             
             if em_art and em_art.data:
                 metadata = em_art.data
             else:
-                # Fallback: build basic metadata from existing artifacts
-                # This handles repos analyzed before RepositoryMetadataStage was added
                 metrics_art = bg_db.query(AnalysisArtifact).filter(
                     AnalysisArtifact.analysis_id == analysis.id,
                     AnalysisArtifact.type == "metrics"
@@ -228,7 +239,7 @@ def generate_summary(repo_name: str, background_tasks: BackgroundTasks, db: Sess
                 
                 metadata = {
                     "schema_version": 1,
-                    "note": "Basic metadata only. Re-analyze the repository to generate enriched metadata.",
+                    "note": "Basic metadata only.",
                     "repository": {
                         "name": repo_name,
                     },
@@ -238,7 +249,7 @@ def generate_summary(repo_name: str, background_tasks: BackgroundTasks, db: Sess
                         "directories": metrics.get("total_directories", "unknown"),
                     },
                     "modules": [
-                        {"name": m.get("module", ""), "function_count": m.get("count", 0)}
+                        {"name": m.get("module", ""), "function_count": m.get("functions", 0)}
                         for m in metrics.get("largest_modules", [])[:5]
                     ],
                     "frameworks": [],
@@ -249,7 +260,6 @@ def generate_summary(repo_name: str, background_tasks: BackgroundTasks, db: Sess
             
             summary_md = llm_service.generate_summary(metadata)
             
-            # Save or update summary artifact
             summary_art = bg_db.query(AnalysisArtifact).filter(AnalysisArtifact.analysis_id == analysis.id, AnalysisArtifact.type == "summary").first()
             if summary_art:
                 summary_art.data = summary_md
@@ -258,14 +268,16 @@ def generate_summary(repo_name: str, background_tasks: BackgroundTasks, db: Sess
                 bg_db.add(summary_art)
             bg_db.commit()
             
-            set_task_status(repo_name, "summary", "completed", current_user, bg_db)
+            set_task_status(repo_name, "summary", "completed", bg_user, bg_db)
         except Exception as e:
             bg_db.rollback()
             import traceback
             logger.error(f"Summary generation failed: \n{traceback.format_exc()}")
-            set_task_status(repo_name, "summary", "failed", current_user, bg_db)
+            if bg_user:
+                set_task_status(repo_name, "summary", "failed", bg_user, bg_db)
         finally:
             bg_db.close()
             
     background_tasks.add_task(background_generate_summary)
     return {"status": "processing"}
+

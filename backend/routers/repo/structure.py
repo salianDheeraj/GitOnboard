@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.models.user import User
-from backend.models.repository import AnalysisJob
+from backend.models.repository import AnalysisJob, AnalysisArtifact
 from backend.dependencies.auth import get_current_user
 from backend.services.github import fetch_file_content
 from backend.routers.repo.services.analysis import get_latest_analysis
@@ -242,6 +242,18 @@ def get_symbols(repo_name: str, db: Session = Depends(get_db), current_user: Use
 @structure_router.get("/{repo_name}/stats")
 def get_stats(repo_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
+        metrics_data = {}
+        try:
+            repo, analysis = get_latest_analysis(repo_name, db, current_user)
+            metrics_art = db.query(AnalysisArtifact).filter(
+                AnalysisArtifact.analysis_id == analysis.id,
+                AnalysisArtifact.type == "metrics"
+            ).first()
+            if metrics_art and metrics_art.data:
+                metrics_data = metrics_art.data
+        except Exception:
+            pass
+
         query_layer = get_or_build_model(repo_name, db, current_user)
         from backend.intelligence.rim.enums import EntityType
         entities = query_layer.model.entities
@@ -251,8 +263,13 @@ def get_stats(repo_name: str, db: Session = Depends(get_db), current_user: User 
         methods = [e for e in entities.values() if e.type == EntityType.METHOD]
         dirs = [e for e in entities.values() if e.type == EntityType.DIRECTORY]
         
-        # Estimate lines of code from location data
-        total_lines = sum(e.location.end_line - e.location.start_line + 1 for e in files if e.location)
+        # Estimate lines of code from metrics artifact or RIM location data
+        lines_of_code = metrics_data.get("lines_of_code", 0)
+        if not lines_of_code:
+            lines_of_code = sum(max(0, e.location.end_line - e.location.start_line + 1) for e in files if e.location)
+            
+        test_cov = metrics_data.get("test_coverage_approx_percent", "N/A")
+        doc_cov = metrics_data.get("documentation_coverage_percent", 0)
         
         # Language counts
         lang_counts: Dict[str, int] = {}
@@ -263,17 +280,17 @@ def get_stats(repo_name: str, db: Session = Depends(get_db), current_user: User 
             lang_counts[lang] = lang_counts.get(lang, 0) + 1
         
         return {
-            "total_files": len(files),
-            "total_directories": len(dirs),
-            "total_functions": len(functions),
-            "total_classes": len(classes),
+            "total_files": metrics_data.get("total_files") or len(files),
+            "total_directories": metrics_data.get("total_directories") or len(dirs),
+            "total_functions": metrics_data.get("total_functions") or len(functions),
+            "total_classes": metrics_data.get("total_classes") or len(classes),
             "total_methods": len(methods),
-            "lines_of_code": total_lines,
+            "lines_of_code": lines_of_code,
             "language_distribution": lang_counts,
             "average_functions_per_module": round(len(functions) / max(len(files), 1), 2),
             "custom_metrics": {
-                "test_coverage_approx_percent": "N/A",
-                "documentation_coverage_percent": 0
+                "test_coverage_approx_percent": test_cov,
+                "documentation_coverage_percent": doc_cov
             }
         }
     except HTTPException:

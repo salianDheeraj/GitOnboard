@@ -25,6 +25,7 @@ dependencies = [
     "PyJWT",
     "sse-starlette",
     "requests",
+    "networkx>=3.4.2",
 ]
 
 [tool.ruff]

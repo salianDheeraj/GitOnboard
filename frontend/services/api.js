@@ -13,7 +13,12 @@ export async function fetchAPI(endpoint, options = {}) {
 
   try {
     const res = await fetch(`/api${endpoint}`, config);
-    const data = await res.json();
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
     
     if (!res.ok) {
       throw new Error(data.detail || data.message || `API Error: ${res.status}`);
