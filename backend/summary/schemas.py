@@ -53,6 +53,7 @@ class BudgetedDocContext(BaseModel):
 
 class SummaryGenerationResult(BaseModel):
     summary_markdown: str
+    structured_summary: Optional[Any] = None
     doc_context_stats: Dict[str, Any] = Field(default_factory=dict)
     discrepancies_detected: List[str] = Field(default_factory=list)
     tool_calls_made: List[Dict[str, Any]] = Field(default_factory=list)

@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
+import json
+import time
+import uuid
 from backend.ai.service import LLMService, get_llm_service
 from backend.repository_tools import RepositoryToolLayer
 from .schemas import BudgetedDocContext, SummaryGenerationResult
@@ -16,6 +19,12 @@ from .discovery import DocDiscovery
 from .classifier import DocClassifier
 from .budgeter import DocContextBudgeter
 from .generator import SummaryGenerator
+from .extractor import EvidenceExtractor
+from .hierarchy import RepositoryHierarchyEngine
+from .chunker import StructuralMarkdownChunker
+from .verifier import ClaimVerifier
+from .validator import DeterministicValidator
+from .audit import SummaryAuditCollector
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +69,22 @@ class SummaryPipeline:
         elif db is not None and analysis_id is not None:
             discovered_docs = self.discovery.discover_from_fact_store(db, analysis_id)
 
+        # Extract Evidence and Infer Hierarchy
+        extractor = EvidenceExtractor()
+        evidence_items = []
+        file_paths = []
+        if repo_root and Path(repo_root).exists():
+            evidence_items = extractor.extract_from_directory(repo_root)
+            file_paths = [str(p.relative_to(repo_root)).replace("\\", "/") for p in Path(repo_root).rglob("*") if p.is_file()]
+
+        hierarchy_engine = RepositoryHierarchyEngine()
+        deployable_units = hierarchy_engine.infer_hierarchy(file_paths, evidence_items, entrypoints=metadata.get("entrypoints", [])) if file_paths else []
+
+        doc_chunks = []
+        for doc in discovered_docs:
+            doc_chunks.extend(StructuralMarkdownChunker.chunk_document(doc.content, doc.path))
+        verified_claims = ClaimVerifier.verify_technology_claims(evidence_items, doc_chunks)
+
         # 2. Context Budgeting
         budgeted_context = self.budgeter.budget(discovered_docs)
         logger.info(
@@ -102,22 +127,89 @@ class SummaryPipeline:
                         logger.debug(f"Progressive grounding tool read failed: {e}")
 
         # 4. Generate Grounded Summary
-        summary_md = await self.generator.generate_summary(
+        raw_summary = await self.generator.generate_summary(
             repo_name=repo_name,
             metadata=metadata,
             metrics=metrics,
             doc_context=budgeted_context,
         )
 
+        structured_summary = None
+        discrepancies_detected: List[str] = []
+        validation_stats: Dict[str, Any] = {}
+        summary_md = raw_summary
+
+        # If LLM returned structured JSON, validate and format to markdown
+        try:
+            raw_data = json.loads(raw_summary)
+            if isinstance(raw_data, dict):
+                evidence_map = {e.evidence_id: e for e in evidence_items}
+                file_paths = [e.file_path for e in evidence_items if e.file_path]
+                structured_summary, rejected_claims, validation_stats = DeterministicValidator.validate_and_sanitize(
+                    raw_data=raw_data,
+                    known_evidence=evidence_map,
+                    verified_claims=verified_claims,
+                    deployable_units=deployable_units,
+                    known_file_paths=file_paths,
+                )
+                discrepancies_detected = [d.repository_reality for d in structured_summary.discrepancies]
+
+                # Format structured summary to clean Markdown
+                md_parts = [
+                    f"# {repo_name} — Repository Summary",
+                    f"\n## 1. Overview & Purpose\n{structured_summary.overview.text}",
+                ]
+                if structured_summary.deployable_units:
+                    md_parts.append("\n## 2. Deployable Units")
+                    for u in structured_summary.deployable_units:
+                        md_parts.append(f"- **{u.name}** ({u.unit_type}): {u.summary} (`{u.root_path}`)")
+                if structured_summary.technologies:
+                    md_parts.append("\n## 3. Tech Stack & Architecture")
+                    for t in structured_summary.technologies:
+                        md_parts.append(f"- **{t.name}** ({t.category}): {t.status}")
+                if structured_summary.discrepancies:
+                    md_parts.append("\n## 4. Discrepancies & Notes")
+                    for d in structured_summary.discrepancies:
+                        md_parts.append(f"- **Claimed**: {d.documented_claim} | **Actual**: {d.repository_reality}")
+
+                summary_md = "\n".join(md_parts)
+        except Exception:
+            pass
+
+        # 5. Handle Verbose Audit Logging
+        is_verbose = verbose_audit
+        if is_verbose is None:
+            is_verbose = os.getenv("SUMMARY_VERBOSE_AUDIT", "false").lower() in ("true", "1", "yes")
+
+        if is_verbose:
+            audit = SummaryAuditCollector()
+            audit.metadata = metadata
+            audit.evidence_index = [e.model_dump() for e in evidence_items]
+            audit.hierarchy = [u.model_dump() for u in deployable_units]
+            audit.retrieval_decisions = {
+                "selected_evidence_count": len(evidence_items),
+                "supplied_units_count": len(deployable_units),
+            }
+            audit.context_sent_to_llm = str(budgeted_context.model_dump())
+            audit.llm_response = {"content": raw_summary}
+            audit.validation_results = validation_stats
+            audit.final_summary_md = summary_md
+            audit.persist_run_artifacts()
+
+        doc_context_stats = {
+            "total_chars": budgeted_context.total_chars,
+            "primary_count": len(budgeted_context.primary_docs),
+            "supporting_count": len(budgeted_context.supporting_docs),
+            "diagram_count": len(budgeted_context.diagram_docs),
+            "agent_count": len(budgeted_context.agent_docs),
+            "omitted_count": len(budgeted_context.omitted_docs),
+            "verified_claims_count": len(verified_claims),
+        }
+
         return SummaryGenerationResult(
             summary_markdown=summary_md,
-            doc_context_stats={
-                "total_chars": budgeted_context.total_chars,
-                "primary_count": len(budgeted_context.primary_docs),
-                "supporting_count": len(budgeted_context.supporting_docs),
-                "diagram_count": len(budgeted_context.diagram_docs),
-                "agent_count": len(budgeted_context.agent_docs),
-                "omitted_count": len(budgeted_context.omitted_docs),
-            },
+            structured_summary=structured_summary,
+            doc_context_stats=doc_context_stats,
+            discrepancies_detected=discrepancies_detected,
             tool_calls_made=tool_calls,
         )
