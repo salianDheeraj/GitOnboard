@@ -27,16 +27,17 @@ const variantClasses = {
  * @param {function} [props.onClick]
  * @param {string} [props.type]
  */
-export function Button({ 
-  children, 
-  variant = 'primary', 
-  size = 'md', 
-  className = '', 
-  icon, 
+export function Button({
+  children,
+  variant = 'primary',
+  size = 'md',
+  className = '',
+  icon,
   iconRight,
   disabled,
   onClick,
-  type = 'button'
+  type = 'button',
+  ...rest
 }) {
   return (
     <button
@@ -47,10 +48,11 @@ export function Button({
         inline-flex items-center justify-center font-medium rounded-lg transition-colors
         focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-slate-900
         disabled:opacity-50 disabled:cursor-not-allowed
-        ${sizeClasses[size]} 
-        ${variantClasses[variant]} 
+        ${sizeClasses[size]}
+        ${variantClasses[variant]}
         ${className}
       `}
+      {...rest}
     >
       {icon && <span className={`${children ? 'mr-2' : ''}`}>{icon}</span>}
       {children}

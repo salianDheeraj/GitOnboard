@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import logging
 import io
@@ -6,6 +7,8 @@ import tempfile
 import os
 import shutil
 from fastapi import HTTPException
+
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +34,20 @@ async def check_repo_limits(owner: str, repo: str, token: str = None):
         data = resp.json()
         
         size_kb = data.get("size", 0)
-        # Size limit 500MB
-        if size_kb > 500 * 1024:
-            raise HTTPException(status_code=400, detail=f"Repository size ({size_kb / 1024:.1f}MB) exceeds 500MB limit.")
-            
+        # Resource-safety ceiling, not a product limit — see config.py. GitHub's
+        # reported `size` is the packed git-object size, an approximation of
+        # the actual zipball transfer size, so this is a coarse pre-flight
+        # guard against pathological repos rather than an exact bound.
+        max_size_kb = settings.max_repo_size_mb * 1024
+        if size_kb > max_size_kb:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Repository size ({size_kb / 1024:.1f}MB) exceeds the "
+                    f"{settings.max_repo_size_mb}MB import limit."
+                ),
+            )
+
         return {
             "github_repo_id": str(data.get("id")),
             "default_branch": data.get("default_branch"),
@@ -64,10 +77,11 @@ async def download_repo_zipball(owner: str, repo: str, branch: str, target_dir: 
         except Exception as e:
             logger.warning(f"Failed to fetch commit metadata: {e}")
 
-        # Stream the download because it might be up to 500MB
+        # Stream the download to disk — this may be a multi-GB archive, so it
+        # must never be buffered fully in memory.
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp_path = tmp.name
-            
+
         try:
             async with client.stream("GET", url, follow_redirects=True) as response:
                 if response.status_code == 404:
@@ -76,37 +90,56 @@ async def download_repo_zipball(owner: str, repo: str, branch: str, target_dir: 
                 with open(tmp_path, "wb") as f:
                     async for chunk in response.aiter_bytes():
                         f.write(chunk)
-            
+
             logger.info("Extracting zipball...")
-            file_count = 0
-            with zipfile.ZipFile(tmp_path, 'r') as zip_ref:
-                # The root folder in github zipballs is usually Owner-Repo-CommitSha
-                root_folder = zip_ref.namelist()[0].split('/')[0]
-                
-                for member in zip_ref.namelist():
-                    if member.endswith('/'):
-                        continue # Skip directories
-                        
-                    # Ignore common large generated directories
-                    parts = member.split('/')
-                    if any(ignore in parts for ignore in ['node_modules', 'dist', 'build', 'vendor', 'target', 'bin', '.git']):
-                        continue
-                        
-                    # Extract single file to target_dir, removing the top-level folder
-                    target_file = os.path.join(target_dir, os.path.relpath(member, root_folder))
-                    os.makedirs(os.path.dirname(target_file), exist_ok=True)
-                    
-                    with zip_ref.open(member) as source, open(target_file, "wb") as target:
-                        shutil.copyfileobj(source, target)
-                    file_count += 1
-                    
-                    if file_count > 50000:
-                        raise HTTPException(status_code=400, detail="Repository exceeds 50,000 files limit.")
-                        
+            # Extraction is synchronous, CPU/disk-bound work (zipfile has no
+            # async API). Run it off the event loop: this process runs a
+            # single uvicorn worker, so a large archive's extraction would
+            # otherwise stall every other request/websocket on the server for
+            # its entire duration (same class of bug fixed for
+            # SandboxManager.resolve_worktree — see sandbox_manager.py).
+            file_count = await asyncio.to_thread(
+                _extract_zipball, tmp_path, target_dir, settings.max_repo_file_count
+            )
+
             return {"file_count": file_count, "commit_info": commit_info}
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+
+def _extract_zipball(zip_path: str, target_dir: str, max_file_count: int) -> int:
+    """Extracts a downloaded zipball to target_dir. Runs on a worker thread —
+    keep this function free of asyncio/event-loop dependencies."""
+    file_count = 0
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        # The root folder in github zipballs is usually Owner-Repo-CommitSha
+        root_folder = zip_ref.namelist()[0].split('/')[0]
+
+        for member in zip_ref.namelist():
+            if member.endswith('/'):
+                continue  # Skip directories
+
+            # Ignore common large generated directories
+            parts = member.split('/')
+            if any(ignore in parts for ignore in ['node_modules', 'dist', 'build', 'vendor', 'target', 'bin', '.git']):
+                continue
+
+            # Extract single file to target_dir, removing the top-level folder
+            target_file = os.path.join(target_dir, os.path.relpath(member, root_folder))
+            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+
+            with zip_ref.open(member) as source, open(target_file, "wb") as target:
+                shutil.copyfileobj(source, target)
+            file_count += 1
+
+            if file_count > max_file_count:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repository exceeds the {max_file_count:,} files import limit.",
+                )
+
+    return file_count
 
 async def fetch_file_content(owner: str, repo: str, branch: str, filepath: str, token: str = None) -> str:
     """Fetch raw file content from GitHub API"""

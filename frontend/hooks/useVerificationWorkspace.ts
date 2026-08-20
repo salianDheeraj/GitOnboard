@@ -71,8 +71,8 @@ export function useVerificationWorkspace(initialRepoName: string = "default") {
     (filePath: string) => {
       const newTabs = openTabs.filter((t) => t !== filePath);
       setOpenTabs(newTabs);
-      if (activeFile === filePath && newTabs.length > 0) {
-        setActiveFile(newTabs[newTabs.length - 1]);
+      if (activeFile === filePath) {
+        setActiveFile(newTabs.length > 0 ? newTabs[newTabs.length - 1] : "");
       }
     },
     [activeFile, openTabs]

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from backend.config import settings
 from backend.database import SessionLocal
 from backend.models.repository import Repository, Analysis, AnalysisJob, AnalysisArtifact
 from backend.services.queue import WorkerInterface
@@ -16,6 +17,20 @@ from backend.intelligence import RepositoryBuilder, RelationshipBuilder, Analysi
 from backend.intelligence.stages.metrics_stage import MetricsStage
 
 logger = logging.getLogger(__name__)
+
+def _ensure_sufficient_disk_space(check_dir: Path) -> None:
+    """Raises if the filesystem backing check_dir has less free space than
+    settings.min_free_disk_mb. Guards against filling the disk mid-download
+    or mid-extraction on a large repository."""
+    min_free_bytes = settings.min_free_disk_mb * 1024 * 1024
+    free_bytes = shutil.disk_usage(check_dir).free
+    if free_bytes < min_free_bytes:
+        raise Exception(
+            f"Insufficient disk space to import repository: "
+            f"{free_bytes / (1024 * 1024):.0f}MB free, "
+            f"{settings.min_free_disk_mb}MB required."
+        )
+
 
 def _serialize_dataclass(obj):
     import dataclasses
@@ -64,15 +79,20 @@ class AnalysisWorker(WorkerInterface):
 
             start_time = datetime.now(timezone.utc)
             try:
+                # 0. Disk-space guardrail before pulling down a potentially
+                # large archive — fail fast and cleanly rather than filling
+                # the disk mid-download/extraction.
+                _ensure_sufficient_disk_space(base_tmp)
+
                 # 1. Download
                 try:
                     download_result = await asyncio.wait_for(
                         download_repo_zipball(owner, repo_name, repo.default_branch, str(target_dir), token),
-                        timeout=120.0
+                        timeout=settings.repo_download_timeout_sec
                     )
                     commit_info = download_result.get("commit_info")
                 except asyncio.TimeoutError:
-                    raise Exception("Download timed out after 120 seconds")
+                    raise Exception(f"Download timed out after {settings.repo_download_timeout_sec:.0f} seconds")
 
                 job.status = "Analyzing"
                 db.commit()
@@ -239,7 +259,7 @@ class AnalysisWorker(WorkerInterface):
                 logger.info(f"Analyzing {repo_name}...")
                 results = await asyncio.wait_for(
                     asyncio.to_thread(run_analysis),
-                    timeout=600.0 # 10 min
+                    timeout=settings.repo_analysis_timeout_sec
                 )
 
                 job.status = "Saving"
@@ -251,7 +271,10 @@ class AnalysisWorker(WorkerInterface):
                 if rim_model:
                     try:
                         from backend.intelligence.store.fact_store import save_rim_to_fact_store
-                        save_rim_to_fact_store(db, analysis.id, rim_model)
+                        # A large repository can mean tens of thousands of ORM
+                        # inserts in this one transaction — keep it off the
+                        # single event loop the same way the analysis stage is.
+                        await asyncio.to_thread(save_rim_to_fact_store, db, analysis.id, rim_model)
                     except Exception as e:
                         db.rollback()
                         logger.error(f"Error persisting facts to Fact Store: {e}")

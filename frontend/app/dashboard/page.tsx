@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { repositoryService } from '@/services/repository';
 import { Button } from '@/components/common/Button';
 import { Modal } from '@/components/common/Modal';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Card } from '@/components/common/Card';
 import { Badge } from '@/components/common/Badge';
 import { Plus, FolderGit2 } from 'lucide-react';
@@ -19,7 +20,10 @@ function DashboardContent() {
   const [importError, setImportError] = useState('');
   const [analyzingRepo, setAnalyzingRepo] = useState<string | null>(null);
   const [cancelingRepo, setCancelingRepo] = useState<string | null>(null);
-  
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
   const searchParams = useSearchParams();
   const searchQuery = searchParams.get('search') || '';
 
@@ -71,16 +75,31 @@ function DashboardContent() {
     return projectName.includes(query) || repoPath.includes(query);
   });
 
-  const handleDelete = async (e: React.MouseEvent, repoName: string) => {
+  const handleDeleteClick = (e: React.MouseEvent, repoName: string) => {
     e.preventDefault();
-    if (!window.confirm(`Are you sure you want to delete ${repoName}?`)) return;
-    
+    setDeleteError('');
+    setDeleteTarget(repoName);
+  };
+
+  const handleCancelDelete = () => {
+    setDeleteTarget(null);
+    setDeleteError('');
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || isDeleting) return;
+
+    setIsDeleting(true);
+    setDeleteError('');
     try {
-      await repositoryService.delete(repoName);
+      await repositoryService.delete(deleteTarget);
+      setDeleteTarget(null);
       fetchRepos();
     } catch (err) {
       console.error("Failed to delete repo", err);
-      alert("Error deleting repository.");
+      setDeleteError((err as any).message || 'Failed to delete repository. Please try again.');
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -261,8 +280,8 @@ function DashboardContent() {
                       {analyzingRepo === repo.project_name ? "Starting..." : "Re-analyze"}
                     </button>
                   )}
-                  <button  
-                    onClick={(e) => handleDelete(e, repo.project_name)}
+                  <button
+                    onClick={(e) => handleDeleteClick(e, repo.project_name)}
                     className="text-red-500 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 text-sm font-medium flex items-center transition-colors px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-950/40"
                   >
                     Delete
@@ -320,6 +339,20 @@ function DashboardContent() {
           </div>
         </form>
       </Modal>
+
+      <ConfirmDialog
+        isOpen={deleteTarget !== null}
+        onClose={handleCancelDelete}
+        onConfirm={handleConfirmDelete}
+        title="Delete Repository"
+        message={`Are you sure you want to delete "${deleteTarget}"?`}
+        description="This will permanently remove the repository, its analysis data, and associated workspace data. This action cannot be undone."
+        confirmLabel="Delete"
+        loadingLabel="Deleting..."
+        isLoading={isDeleting}
+        error={deleteError}
+        variant="danger"
+      />
     </div>
     </div>
   );

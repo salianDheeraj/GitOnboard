@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   FilePlus,
   FolderPlus,
@@ -32,6 +32,7 @@ import {
   getRepositoryStructure,
   getFileSymbols,
 } from "@/services/repositoryApi";
+import { sanitizeFileTree, toggleExpandedPath, mergeAncestorPaths } from "@/utils/fileTree";
 
 interface FileExplorerPanelProps {
   activeFile: string;
@@ -100,78 +101,24 @@ function renderFileIcon(fileName: string) {
   return <File className="w-3.5 h-3.5 text-[#8B949E] flex-shrink-0" />;
 }
 
-/**
- * Sanitizes the raw tree hierarchy to strictly separate real filesystem directories
- * and files, removing any nested AST code structures (classes/functions) from the file tree.
- */
-function sanitizeFileTree(node: FileTreeNode): FileTreeNode {
-  if (node.type === "directory") {
-    const validChildren = (node.children || [])
-      .filter((child) => child.type === "directory" || child.type === "file" || child.name.includes("."))
-      .map((child) => {
-        // If node is a file, strip any AST symbol children
-        if (child.type === "file" || (!child.type && child.name.includes("."))) {
-          return {
-            name: child.name,
-            type: "file" as const,
-            path: child.path,
-          };
-        }
-        return sanitizeFileTree(child);
-      })
-      .sort((a, b) => {
-        const aIsDir = a.type === "directory";
-        const bIsDir = b.type === "directory";
-        if (aIsDir && !bIsDir) return -1;
-        if (!aIsDir && bIsDir) return 1;
-        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      });
-
-    return {
-      ...node,
-      type: "directory",
-      children: validChildren,
-    };
-  }
-
-  return {
-    name: node.name,
-    type: "file",
-    path: node.path,
-  };
-}
-
-/**
- * Recursively finds the first real file in the scanned hierarchy.
- */
-function findFirstValidFile(node: FileTreeNode | null): string | null {
-  if (!node) return null;
-  if (node.type === "file" && node.path) {
-    return node.path;
-  }
-  if (node.children && node.children.length > 0) {
-    for (const child of node.children) {
-      const found = findFirstValidFile(child);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
 // Recursive Tree Node Component
 function TreeNode({
   node,
   activeFile,
   onSelectFile,
+  expandedPaths,
+  onToggle,
   depth = 0,
 }: {
   node: FileTreeNode;
   activeFile: string;
   onSelectFile: (path: string) => void;
+  expandedPaths: Set<string>;
+  onToggle: (path: string) => void;
   depth?: number;
 }) {
   const isDirectory = node.type === "directory";
-  const [isOpen, setIsOpen] = useState(depth < 2);
+  const isOpen = expandedPaths.has(node.path);
 
   if (isDirectory) {
     return (
@@ -179,7 +126,7 @@ function TreeNode({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            setIsOpen(!isOpen);
+            onToggle(node.path);
           }}
           style={{ paddingLeft: `${depth * 12 + 8}px` }}
           className="w-full py-1 px-1.5 flex items-center gap-1.5 hover:bg-[#1E222A] text-[#E6EDF3] transition-colors text-[11px] font-medium select-none group"
@@ -203,6 +150,8 @@ function TreeNode({
                 node={child}
                 activeFile={activeFile}
                 onSelectFile={onSelectFile}
+                expandedPaths={expandedPaths}
+                onToggle={onToggle}
                 depth={depth + 1}
               />
             ))}
@@ -249,25 +198,57 @@ export function FileExplorerPanel({
   const [loadingStructure, setLoadingStructure] = useState(true);
   const [isOutlineExpanded, setIsOutlineExpanded] = useState(true);
 
-  // Fetch real directory structure on mount or repo change
+  // Which directory paths are expanded in the tree ("" = the repository root,
+  // which starts open so top-level folders/files are visible). This is the
+  // single source of truth for expansion — selecting a file never touches it,
+  // except to reveal the ancestors of a file selected from outside the tree
+  // (see the effect below).
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set([""]));
+
+  // Tracks whether the in-flight activeFile change was triggered by a click
+  // inside this tree (in which case expansion must be left alone) versus an
+  // external caller like search/AI navigation (which may need ancestors revealed).
+  const internalSelectionRef = useRef(false);
+
+  const toggleExpand = useCallback((path: string) => {
+    setExpandedPaths((prev) => toggleExpandedPath(prev, path));
+  }, []);
+
+  const handleTreeSelectFile = useCallback(
+    (path: string) => {
+      internalSelectionRef.current = true;
+      onSelectFile(path);
+    },
+    [onSelectFile]
+  );
+
+  // Reveal only the ancestors of a file selected from outside the explorer
+  // (e.g. search/symbol/AI navigation). Clicks originating in the tree itself
+  // are flagged via internalSelectionRef and skip this entirely.
+  useEffect(() => {
+    if (!activeFile) return;
+    if (internalSelectionRef.current) {
+      internalSelectionRef.current = false;
+      return;
+    }
+    setExpandedPaths((prev) => mergeAncestorPaths(prev, activeFile));
+  }, [activeFile]);
+
+  // Fetch real directory structure on mount or repo change. Selecting a file
+  // must NOT re-trigger this — it previously depended on `activeFile`, which
+  // forced a refetch (and the loading-state remount below) on every click,
+  // wiping out expansion state.
   useEffect(() => {
     let isMounted = true;
     setLoadingStructure(true);
+    setTreeHierarchy(null);
+    setExpandedPaths(new Set([""]));
 
     getRepositoryStructure(repoName)
       .then((tree) => {
         if (isMounted) {
-          const sanitizedTree = sanitizeFileTree(tree);
-          setTreeHierarchy(sanitizedTree);
+          setTreeHierarchy(sanitizeFileTree(tree));
           setLoadingStructure(false);
-
-          // Automatically select the first valid file if none is active
-          if (!activeFile && sanitizedTree) {
-            const firstFile = findFirstValidFile(sanitizedTree);
-            if (firstFile) {
-              onSelectFile(firstFile);
-            }
-          }
         }
       })
       .catch(() => {
@@ -277,7 +258,7 @@ export function FileExplorerPanel({
     return () => {
       isMounted = false;
     };
-  }, [repoName, activeFile, onSelectFile]);
+  }, [repoName]);
 
   // Fetch real AST symbols for active file
   useEffect(() => {
@@ -336,7 +317,13 @@ export function FileExplorerPanel({
             <span>Loading tree...</span>
           </div>
         ) : treeHierarchy ? (
-          <TreeNode node={treeHierarchy} activeFile={activeFile} onSelectFile={onSelectFile} />
+          <TreeNode
+            node={treeHierarchy}
+            activeFile={activeFile}
+            onSelectFile={handleTreeSelectFile}
+            expandedPaths={expandedPaths}
+            onToggle={toggleExpand}
+          />
         ) : (
           <div className="p-3 text-xs text-[#8B949E] italic">No directory structure found.</div>
         )}

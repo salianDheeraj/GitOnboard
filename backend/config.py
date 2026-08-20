@@ -65,6 +65,22 @@ class Settings(BaseSettings):
     azure_storage_container: str = "gitonboard-repos"
     azure_storage_endpoint: str = "http://azurite:10000/devstoreaccount1"
 
+    # Repository import resource guardrails.
+    #
+    # These bound how big a single GitHub import is allowed to be so one
+    # import can't exhaust disk, blow up the analysis pipeline, or take
+    # unbounded time — they are NOT a product-level "we don't support large
+    # repos" cap. Defaults are sized to comfortably admit large real-world
+    # monorepos (e.g. microsoft/vscode, GitHub-reported size ~1.3GB) while
+    # still rejecting pathological/malicious uploads.
+    max_repo_size_mb: int = 5000
+    max_repo_file_count: int = 200_000
+    repo_download_timeout_sec: float = 900.0
+    repo_analysis_timeout_sec: float = 1800.0
+    # Minimum free disk space required (in the temp/worktree filesystem)
+    # before starting a repository download+extraction.
+    min_free_disk_mb: int = 2048
+
     class Config:
         env_file = ".env"
         extra = "ignore"
