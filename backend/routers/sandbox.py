@@ -42,12 +42,15 @@ def verify_sandbox_run_owner(
     """
     run = db.query(AgentRun).filter((AgentRun.id == run_id) | (AgentRun.task_id == run_id)).first()
     if not run:
-        # Check if run_id is a repository owned by current_user
+        # Check if run_id or repo prefix is a repository owned by current_user
+        repo_prefix = run_id.split("_")[0] if "_" in run_id else run_id
         repo = db.query(Repository).filter(
             Repository.user_id == current_user.id,
             (Repository.id == (int(run_id) if run_id.isdigit() else -1)) |
             (Repository.url.endswith(f"/{run_id}")) |
-            (Repository.url.endswith(f"/{run_id}.git"))
+            (Repository.url.endswith(f"/{run_id}.git")) |
+            (Repository.url.endswith(f"/{repo_prefix}")) |
+            (Repository.url.endswith(f"/{repo_prefix}.git"))
         ).first()
         if repo:
             latest_run = db.query(AgentRun).filter(

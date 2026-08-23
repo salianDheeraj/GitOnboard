@@ -23,18 +23,38 @@ from backend.models.fact_store import FactCapability, FactRoute, FactSymbol
 from backend.models.implementation import AgentEvent, AgentEventType
 
 
+from backend.dependencies.auth import get_current_user
+from backend.models.user import User
+
+
 @pytest.fixture(autouse=True)
 def init_db():
     Base.metadata.create_all(bind=engine)
     session = SessionLocal()
+    user = session.query(User).filter(User.id == 1).first()
+    if not user:
+        user = User(id=1, github_id="gh_ctx_user", username="ctx_tester", email="ctx@example.com")
+        session.add(user)
+        session.commit()
     yield session
     session.close()
 
 
 @pytest.fixture
-def client():
+def auth_user():
+    with SessionLocal() as db:
+        return db.query(User).filter(User.id == 1).first()
+
+
+@pytest.fixture
+def client(auth_user):
+    def override_current_user():
+        return auth_user
+
+    app.dependency_overrides[get_current_user] = override_current_user
     with TestClient(app) as test_client:
         yield test_client
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -66,8 +86,21 @@ def sample_worktree():
         yield str(wt_path)
 
 
+from backend.models.fact_store import FactCapability, FactFile, FactRoute, FactSymbol
+from backend.models.repository import Analysis, Repository
+
+
 def test_scenario_existing_feature_modification(init_db, sample_worktree):
     db = init_db
+
+    # Seed Repository, Analysis, and FactFile for foreign key integrity
+    repo = Repository(id=1, url="https://github.com/test/demo-app.git", user_id=1)
+    analysis = Analysis(id=1, repository_id=1, status="Completed")
+    file_record = FactFile(id="demo:file:app/auth.py", analysis_id=1, path="app/auth.py")
+    db.merge(repo)
+    db.merge(analysis)
+    db.merge(file_record)
+    db.commit()
 
     # Seed Fact Store
     sym = FactSymbol(
@@ -138,13 +171,14 @@ def test_scenario_unmatched_capability_unknowns(init_db, sample_worktree):
     assert any("No existing capability found" in u for u in ctx.unknowns)
 
 
-def test_context_assembly_http_endpoint(client: TestClient, init_db, sample_worktree):
+def test_context_assembly_http_endpoint(client: TestClient, init_db, sample_worktree, auth_user):
     db = init_db
     agent = EngineeringAgent()
     run = agent.create_run(
         db,
         repository_id="demo-app",
         user_requirement="Inspect repository dependencies and files",
+        user_id=auth_user.id,
     )
     run.worktree_path = sample_worktree
     db.add(run)

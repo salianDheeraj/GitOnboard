@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     deployment_type: str = "LOCAL"
 
     # Storage & Sandbox Config
+    storage_type: str = "azure"
     storage_path: str = "data"
     worktrees_dir: str = "data/worktrees"
     workspace_dir: str = "."

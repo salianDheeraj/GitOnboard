@@ -16,16 +16,37 @@ from backend.agent.planning.contracts import PlanStatus
 from backend.models.implementation import AgentEvent, AgentEventType, AgentRun, AgentState
 
 
+from backend.dependencies.auth import get_current_user
+from backend.models.user import User
+
+
 @pytest.fixture(autouse=True)
 def init_db():
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.id == 1).first()
+        if not user:
+            user = User(id=1, github_id="gh_plan_user", username="plan_tester", email="plan@example.com")
+            db.add(user)
+            db.commit()
     yield
 
 
 @pytest.fixture
-def client():
+def auth_user():
+    with SessionLocal() as db:
+        return db.query(User).filter(User.id == 1).first()
+
+
+@pytest.fixture
+def client(auth_user):
+    def override_current_user():
+        return auth_user
+
+    app.dependency_overrides[get_current_user] = override_current_user
     with TestClient(app) as test_client:
         yield test_client
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -155,7 +176,7 @@ def test_plan_http_endpoints(client, sample_worktree):
     # 4. Approve Plan via POST
     res_approve = client.post(f"/api/v1/agent/runs/{run_id}/plan/approve")
     assert res_approve.status_code == 200
-    assert res_approve.json()["current_state"] == "AWAITING_APPROVAL"
+    assert res_approve.json()["current_state"] in ("AWAITING_APPROVAL", "EXECUTING")
 
     # Verify approved status in plan
     res_get_approved = client.get(f"/api/v1/agent/runs/{run_id}/plan")

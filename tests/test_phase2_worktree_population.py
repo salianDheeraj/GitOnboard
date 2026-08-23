@@ -24,15 +24,44 @@ from backend.services.worktree_provisioner import WorktreeProvisioner
 from backend.services.sandbox_manager import SandboxManager
 
 
+from backend.database import Base, SessionLocal, engine
+from backend.dependencies.auth import get_current_user
+from backend.models.repository import Repository
+from backend.models.user import User
+
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_worktree_db():
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.id == 1).first()
+        if not user:
+            user = User(id=1, github_id="gh_wt_user", username="wt_tester", email="wt@example.com")
+            db.add(user)
+            db.commit()
+    yield
+
+
 @pytest.fixture(scope="module")
-def client():
+def auth_user():
+    with SessionLocal() as db:
+        return db.query(User).filter(User.id == 1).first()
+
+
+@pytest.fixture(scope="module")
+def client(auth_user):
     """TestClient instance for API tests."""
+    def override_current_user():
+        return auth_user
+
+    app.dependency_overrides[get_current_user] = override_current_user
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture(scope="module")
-def sample_repo_fixture():
+def sample_repo_fixture(auth_user):
     """Creates an isolated fixture repository in local repos directory."""
     repo_name = f"sample-repo-{uuid.uuid4().hex[:6]}"
     repos_dir = Path(settings.storage_path) / "repos" / repo_name
@@ -43,6 +72,14 @@ def sample_repo_fixture():
     (repos_dir / "package.json").write_text('{"name": "sample-pkg", "version": "1.0.0"}', encoding="utf-8")
     (repos_dir / "src").mkdir(parents=True, exist_ok=True)
     (repos_dir / "src" / "index.js").write_text("console.log('Hello from sample repo');", encoding="utf-8")
+
+    with SessionLocal() as db:
+        repo = Repository(
+            url=f"https://github.com/test/{repo_name}.git",
+            user_id=auth_user.id,
+        )
+        db.add(repo)
+        db.commit()
 
     yield {
         "repo_name": repo_name,
@@ -174,7 +211,7 @@ def test_terminal_editor_content_consistency(client: TestClient, sample_repo_fix
 # Test F: Repository Isolation Between Independent Runs
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_repository_isolation_between_runs(client: TestClient):
+def test_repository_isolation_between_runs(client: TestClient, auth_user):
     """
     Verifies that Run A (for Repo A) and Run B (for Repo B) have distinct files and cannot leak.
     """
@@ -190,6 +227,12 @@ def test_repository_isolation_between_runs(client: TestClient):
     dir_b = Path(settings.storage_path) / "repos" / repo_b
     dir_b.mkdir(parents=True, exist_ok=True)
     (dir_b / "file_b.txt").write_text("THIS_IS_FILE_B", encoding="utf-8")
+
+    with SessionLocal() as db:
+        repo_a_model = Repository(url=f"https://github.com/test/{repo_a}.git", user_id=auth_user.id)
+        repo_b_model = Repository(url=f"https://github.com/test/{repo_b}.git", user_id=auth_user.id)
+        db.add_all([repo_a_model, repo_b_model])
+        db.commit()
 
     try:
         run_a = f"{repo_a}_run"

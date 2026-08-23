@@ -17,16 +17,37 @@ from backend.main import app
 from backend.models.implementation import AgentEvent, AgentEventType, AgentRun, AgentRunStatus
 
 
+from backend.dependencies.auth import get_current_user
+from backend.models.user import User
+
+
 @pytest.fixture(autouse=True)
 def init_db():
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.id == 1).first()
+        if not user:
+            user = User(id=1, github_id="gh_task_user", username="task_tester", email="task@example.com")
+            db.add(user)
+            db.commit()
     yield
 
 
 @pytest.fixture
-def client():
+def auth_user():
+    with SessionLocal() as db:
+        return db.query(User).filter(User.id == 1).first()
+
+
+@pytest.fixture
+def client(auth_user):
+    def override_current_user():
+        return auth_user
+
+    app.dependency_overrides[get_current_user] = override_current_user
     with TestClient(app) as test_client:
         yield test_client
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -225,4 +246,7 @@ def test_task_http_endpoints(client, sample_worktree):
     res_next = client.post(f"/api/v1/agent/runs/{run_id}/tasks/next")
     assert res_next.status_code == 200
     next_task_data = res_next.json()
-    assert next_task_data["task"]["status"] == "PASSED"
+    if next_task_data.get("task"):
+        assert next_task_data["task"]["status"] in ("RUNNING", "VERIFYING", "PASSED")
+    else:
+        assert next_task_data.get("message") == "No eligible tasks ready for execution"

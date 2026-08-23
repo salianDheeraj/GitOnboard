@@ -588,7 +588,9 @@ def execute_approved_plan(
     Starts controlled execution of the approved implementation plan.
     Strict preconditions: Run must be in AWAITING_APPROVAL and Plan must be APPROVED.
     """
-    _get_authorized_run(run_id, current_user, db)
+    run = _get_authorized_run(run_id, current_user, db)
+    if run.current_state in (AgentState.EXECUTING, AgentState.COMPLETED):
+        return _serialize_run(run)
     try:
         run = agent_service.start_plan_execution(db=db, run_id=run_id)
         return _serialize_run(run)

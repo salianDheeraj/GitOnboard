@@ -17,13 +17,16 @@ def get_storage() -> ObjectStorage:
     """
     global _storage_instance
     if _storage_instance is None:
-        _storage_instance = AzureBlobStorage(
-            connection_string=settings.azure_storage_connection_string or None,
-            container_name=settings.azure_storage_container,
-            account_name=settings.azure_storage_account_name or None,
-            account_key=settings.azure_storage_account_key or None,
-            endpoint_url=settings.azure_storage_endpoint or None,
-        )
+        if settings.storage_type.lower() == "memory":
+            _storage_instance = InMemoryObjectStorage()
+        else:
+            _storage_instance = AzureBlobStorage(
+                connection_string=settings.azure_storage_connection_string or None,
+                container_name=settings.azure_storage_container,
+                account_name=settings.azure_storage_account_name or None,
+                account_key=settings.azure_storage_account_key or None,
+                endpoint_url=settings.azure_storage_endpoint or None,
+            )
     return _storage_instance
 
 

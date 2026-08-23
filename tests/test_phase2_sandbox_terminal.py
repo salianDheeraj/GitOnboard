@@ -25,15 +25,44 @@ from backend.config import settings
 from backend.services.sandbox_manager import SandboxManager
 
 
+from backend.database import Base, SessionLocal, engine
+from backend.dependencies.auth import get_current_user
+from backend.models.implementation import AgentRun, AgentRunStatus, AgentState
+from backend.models.user import User
+
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_sandbox_db():
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.id == 1).first()
+        if not user:
+            user = User(id=1, github_id="gh_sandbox_user", username="sandbox_tester", email="sandbox@example.com")
+            db.add(user)
+            db.commit()
+    yield
+
+
 @pytest.fixture(scope="module")
-def client():
+def auth_user():
+    with SessionLocal() as db:
+        return db.query(User).filter(User.id == 1).first()
+
+
+@pytest.fixture(scope="module")
+def client(auth_user):
     """TestClient instance for API tests."""
+    def override_current_user():
+        return auth_user
+
+    app.dependency_overrides[get_current_user] = override_current_user
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture(scope="module")
-def sandbox_run_fixture():
+def sandbox_run_fixture(auth_user):
     """Creates a temporary isolated worktree directory for testing sandbox execution."""
     run_id = f"test-run-{uuid.uuid4().hex[:8]}"
     worktrees_root = Path(settings.worktrees_dir).resolve()
@@ -45,6 +74,20 @@ def sandbox_run_fixture():
     # Seed files inside the worktree
     (wt_dir / "sample_file.txt").write_text("Hello from worktree sample file!\n", encoding="utf-8")
     (wt_dir / "app.py").write_text("print('App inside worktree')\n", encoding="utf-8")
+
+    with SessionLocal() as db:
+        run = AgentRun(
+            id=run_id,
+            task_id=f"task_{run_id}",
+            user_id=auth_user.id,
+            repository_id="test-sandbox-repo",
+            user_requirement="test",
+            worktree_path=str(wt_dir),
+            current_state=AgentState.EXECUTING,
+            status=AgentRunStatus.RUNNING,
+        )
+        db.merge(run)
+        db.commit()
 
     yield {
         "run_id": run_id,
@@ -307,13 +350,36 @@ def test_sandbox_persistent_environment(client: TestClient, sandbox_run_fixture)
 # 12. Session Isolation Between Runs (Phase 2.1)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_sandbox_session_isolation(client: TestClient):
+def _provision_test_run(run_id: str, user_id: int = 1) -> Path:
+    worktrees_root = Path(settings.worktrees_dir).resolve()
+    worktrees_root.mkdir(parents=True, exist_ok=True)
+    wt_dir = worktrees_root / run_id
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    with SessionLocal() as db:
+        run = AgentRun(
+            id=run_id,
+            task_id=f"task_{run_id}",
+            user_id=user_id,
+            repository_id="test-sandbox-repo",
+            user_requirement="test",
+            worktree_path=str(wt_dir),
+            current_state=AgentState.EXECUTING,
+            status=AgentRunStatus.RUNNING,
+        )
+        db.merge(run)
+        db.commit()
+    return wt_dir
+
+
+def test_sandbox_session_isolation(client: TestClient, auth_user):
     """
     Verifies that two different runs (Run A and Run B) maintain completely isolated sessions
     with no leakage of cwd or environment variables.
     """
     run_a = f"test-run-iso-a-{uuid.uuid4().hex[:6]}"
     run_b = f"test-run-iso-b-{uuid.uuid4().hex[:6]}"
+    _provision_test_run(run_a, auth_user.id)
+    _provision_test_run(run_b, auth_user.id)
 
     # In Session A: Export unique variable
     res_a1 = client.post(
@@ -336,11 +402,12 @@ def test_sandbox_session_isolation(client: TestClient):
 # 13. Session Lifecycle Management API (Phase 2.1)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_sandbox_session_lifecycle_api(client: TestClient):
+def test_sandbox_session_lifecycle_api(client: TestClient, auth_user):
     """
     Verifies session creation, custom session IDs, and explicit deletion.
     """
     run_id = f"test-run-lifecycle-{uuid.uuid4().hex[:6]}"
+    _provision_test_run(run_id, auth_user.id)
 
     # 1. Create session
     res_create = client.post(f"/api/v1/sandbox/{run_id}/session")

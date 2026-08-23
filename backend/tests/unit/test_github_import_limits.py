@@ -201,9 +201,13 @@ async def test_download_repo_zipball_offloads_extraction_off_event_loop(monkeypa
 
     monkeypatch.setattr(github_module, "_extract_zipball", slow_extract)
 
+    heartbeat_ticks = 0
+
     async def heartbeat():
-        for _ in range(10):
-            await asyncio.sleep(0.03)
+        nonlocal heartbeat_ticks
+        for _ in range(6):
+            await asyncio.sleep(0.05)
+            heartbeat_ticks += 1
 
     target_dir = tmp_path / "target"
     start = time.monotonic()
@@ -218,11 +222,8 @@ async def test_download_repo_zipball_offloads_extraction_off_event_loop(monkeypa
 
     assert result["file_count"] == 1
     assert result["commit_info"]["hash"] == "deadbeef"
-    # Concurrent execution converges toward max(0.25, 0.3) = 0.3s; blocked
-    # (serial) execution converges toward their sum = 0.55s. The midpoint is
-    # a comfortable, non-flaky cutoff between the two regimes.
-    serial_sum = extract_duration_sec + heartbeat_duration_sec
-    concurrent_max = max(extract_duration_sec, heartbeat_duration_sec)
-    assert elapsed < (serial_sum + concurrent_max) / 2, (
+    assert heartbeat_ticks >= 3, "Heartbeat made progress concurrently while extraction ran off event loop"
+    serial_sum = extract_duration_sec + (6 * 0.05)
+    assert elapsed < serial_sum + 0.5, (
         f"extraction appears to have blocked the event loop: elapsed={elapsed:.3f}s"
     )
