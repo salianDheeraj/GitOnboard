@@ -12,7 +12,7 @@ export function useVerificationWorkspace(initialRepoName: string = "default") {
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [editorMode, setEditorMode] = useState<"source" | "diff">("source");
   const [logs, setLogs] = useState<string[]>([
-    `[System] GitOnBoard Workspace initialized for repository '${initialRepoName}'.`,
+    `[System] GitOnboard Workspace initialized for repository '${initialRepoName}'.`,
     "[Ready] Multi-Vector Verification Mesh stand-by.",
   ]);
 

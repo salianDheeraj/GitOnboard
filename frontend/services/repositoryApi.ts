@@ -69,7 +69,7 @@ export async function getFileContent(
       throw new Error(`Storage Timeout: Request to stream '${filePath}' timed out.`);
     }
     if (res.status >= 500) {
-      throw new Error(`Storage Service Error (${res.status}): Azurite blob read failed for '${filePath}'.`);
+      throw new Error(`Storage Service Error (${res.status}): failed to read '${filePath}'.`);
     }
     throw new Error(`Failed to load file (${res.status}): ${filePath}`);
   }

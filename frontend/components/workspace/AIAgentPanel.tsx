@@ -28,6 +28,7 @@ interface AIAgentPanelProps {
   onClose: () => void;
   onSelectFile: (filePath: string) => void;
   runState?: RunState;
+  logs?: string[];
   onStartTaskPrompt?: (prompt: string) => void;
   onTriggerRepair?: () => void;
   width?: number;
@@ -38,6 +39,7 @@ export function AIAgentPanel({
   onClose,
   onSelectFile,
   runState,
+  logs = [],
   onStartTaskPrompt,
   onTriggerRepair,
   width = 380,
@@ -180,6 +182,7 @@ export function AIAgentPanel({
         {activeView === "chat" && (
           <ChatPanel
             snapshot={snapshot}
+            logs={logs}
             onStartRun={(prompt) => {
               startRun(prompt);
             }}

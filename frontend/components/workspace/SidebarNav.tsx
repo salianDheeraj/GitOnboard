@@ -1,18 +1,7 @@
 "use client";
 
 import React from "react";
-import {
-  Code2,
-  FolderTree,
-  Terminal,
-  Sparkles,
-  GitBranch,
-  Database,
-  Keyboard,
-  BookOpen,
-  Settings2,
-  User,
-} from "lucide-react";
+import { FolderTree, Terminal, Sparkles, Keyboard } from "lucide-react";
 
 interface SidebarNavProps {
   activeTab: string;
@@ -38,24 +27,18 @@ export function SidebarNav({
   onOpenShortcuts,
 }: SidebarNavProps) {
   const topNavItems = [
-    { id: "editor", icon: Code2, label: "Code / Editor" },
     { id: "projects", icon: FolderTree, label: "Explorer (Ctrl+B)", isPanelToggle: true, isOpen: isFileExplorerOpen },
     { id: "terminal", icon: Terminal, label: "Terminal & Tests (Ctrl+`)", isPanelToggle: true, isOpen: isTerminalOpen },
     { id: "agent", icon: Sparkles, label: "AI Agent Chat (Ctrl+L)", isPanelToggle: true, isOpen: isAIAgentOpen },
-    { id: "git", icon: GitBranch, label: "Source Control" },
-    { id: "database", icon: Database, label: "Database" },
   ];
 
   const bottomNavItems = [
-    { id: "shortcuts", icon: Keyboard, label: "Keyboard Shortcuts (?)" },
-    { id: "docs", icon: BookOpen, label: "Documentation" },
-    { id: "settings", icon: Settings2, label: "Settings" },
-    { id: "account", icon: User, label: "Account" },
+    { id: "shortcuts", icon: Keyboard, label: "Keyboard Shortcuts (?)", isPanelToggle: false, isOpen: false },
   ];
 
   const handleItemClick = (id: string) => {
     setActiveTab(id);
-    if (id === "projects" || id === "editor") {
+    if (id === "projects") {
       setIsFileExplorerOpen(!isFileExplorerOpen);
     } else if (id === "terminal" && onToggleTerminal) {
       onToggleTerminal();
@@ -67,7 +50,7 @@ export function SidebarNav({
   };
 
   return (
-    <aside className="w-12 bg-[#0A0D10] border-r border-[#2F343A] flex flex-col justify-between items-center py-2 flex-shrink-0 select-none z-10">
+    <aside className="w-12 bg-workspace-bg border-r border-workspace-border flex flex-col justify-between items-center py-2 flex-shrink-0 select-none z-10">
       {/* Top Nav Group */}
       <div className="flex flex-col gap-1 w-full items-center">
         {topNavItems.map((item) => {
@@ -78,24 +61,26 @@ export function SidebarNav({
               key={item.id}
               onClick={() => handleItemClick(item.id)}
               title={item.label}
+              aria-label={item.label}
+              aria-pressed={item.isPanelToggle ? Boolean(item.isOpen) : undefined}
               className={`relative w-9 h-9 rounded-lg flex items-center justify-center transition-all group ${
                 isActive
-                  ? "bg-purple-600/20 text-purple-400 font-semibold shadow-sm"
-                  : "text-[#8B949E] hover:text-[#E6EDF3] hover:bg-[#14181E]"
+                  ? "bg-workspace-accent/20 text-workspace-accent font-semibold shadow-sm"
+                  : "text-workspace-text-muted hover:text-workspace-text hover:bg-workspace-surface"
               }`}
             >
-              {/* Purple Left Highlight Bar for Active State */}
+              {/* Accent Left Highlight Bar for Active State */}
               {isActive && (
-                <span className="absolute left-0 top-1.5 bottom-1.5 w-1 bg-purple-500 rounded-r-md shadow-sm shadow-purple-500/50" />
+                <span className="absolute left-0 top-1.5 bottom-1.5 w-1 bg-workspace-accent rounded-r-md shadow-sm shadow-workspace-accent/50" />
               )}
-              <Icon className={`w-5 h-5 transition-transform group-hover:scale-105 ${isActive ? "text-purple-400" : ""}`} />
+              <Icon className={`w-5 h-5 transition-transform group-hover:scale-105 ${isActive ? "text-workspace-accent" : ""}`} />
             </button>
           );
         })}
       </div>
 
       {/* Bottom Nav Group */}
-      <div className="flex flex-col gap-1 w-full items-center pt-2 border-t border-[#2F343A]/60">
+      <div className="flex flex-col gap-1 w-full items-center pt-2 border-t border-workspace-border/60">
         {bottomNavItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
@@ -104,14 +89,16 @@ export function SidebarNav({
               key={item.id}
               onClick={() => handleItemClick(item.id)}
               title={item.label}
+              aria-label={item.label}
+              aria-pressed={item.isPanelToggle ? Boolean(item.isOpen) : undefined}
               className={`relative w-9 h-9 rounded-lg flex items-center justify-center transition-all group ${
                 isActive
-                  ? "bg-purple-600/20 text-purple-400 font-semibold shadow-sm"
-                  : "text-[#8B949E] hover:text-[#E6EDF3] hover:bg-[#14181E]"
+                  ? "bg-workspace-accent/20 text-workspace-accent font-semibold shadow-sm"
+                  : "text-workspace-text-muted hover:text-workspace-text hover:bg-workspace-surface"
               }`}
             >
               {isActive && (
-                <span className="absolute left-0 top-1.5 bottom-1.5 w-1 bg-purple-500 rounded-r-md shadow-sm shadow-purple-500/50" />
+                <span className="absolute left-0 top-1.5 bottom-1.5 w-1 bg-workspace-accent rounded-r-md shadow-sm shadow-workspace-accent/50" />
               )}
               <Icon className="w-5 h-5 transition-transform group-hover:scale-105" />
             </button>

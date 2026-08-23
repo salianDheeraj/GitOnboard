@@ -177,15 +177,24 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
         return;
       }
 
-      // 3. Toggle AI Agent: Ctrl+L or Ctrl+I / Cmd+L or Cmd+I
-      if (isCtrlOrMeta && (e.key.toLowerCase() === "l" || e.key.toLowerCase() === "i")) {
+      // 3. Toggle AI Agent: Ctrl+I always works; Ctrl+L is Monaco's own
+      // "Expand Line Selection" binding while editing, so it only fires
+      // when focus isn't inside an editable surface (Monaco's own hidden
+      // input is a real <textarea>, so isInputFocused already covers it).
+      if (isCtrlOrMeta && e.key.toLowerCase() === "i") {
+        e.preventDefault();
+        toggleAIAgent();
+        return;
+      }
+      if (isCtrlOrMeta && e.key.toLowerCase() === "l" && !isInputFocused) {
         e.preventDefault();
         toggleAIAgent();
         return;
       }
 
-      // 4. Focus Global Search: Ctrl+K / Cmd+K
-      if (isCtrlOrMeta && e.key.toLowerCase() === "k") {
+      // 4. Focus Global Search: Ctrl+K / Cmd+K — guarded the same way, since
+      // Monaco reserves Ctrl+K as a chord prefix (Ctrl+K Ctrl+C, etc.) while editing.
+      if (isCtrlOrMeta && e.key.toLowerCase() === "k" && !isInputFocused) {
         e.preventDefault();
         const searchInput = document.getElementById("global-search-input") as HTMLInputElement | null;
         if (searchInput) {
@@ -195,8 +204,10 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
         return;
       }
 
-      // 5. Run Verification: Ctrl+Enter / Cmd+Enter
-      if (isCtrlOrMeta && e.key === "Enter") {
+      // 5. Run Verification: Ctrl+Enter / Cmd+Enter — guarded the same way,
+      // since Monaco binds Ctrl+Enter to "Insert Line Below" while editing;
+      // without this guard both actions fired on the same keystroke.
+      if (isCtrlOrMeta && e.key === "Enter" && !isInputFocused) {
         e.preventDefault();
         if (!runState?.isLoading) {
           handleStartTaskPrompt(runState.taskPrompt);
@@ -228,7 +239,7 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
   }, [toggleFileExplorer, toggleTerminal, toggleAIAgent, toggleShortcutsModal, runState, handleStartTaskPrompt, isShortcutsModalOpen]);
 
   return (
-    <div className="h-screen w-screen bg-[#0A0D10] text-[#E6EDF3] flex flex-col overflow-hidden font-sans select-none antialiased">
+    <div className="workspace h-screen w-screen bg-workspace-bg text-workspace-text flex flex-col overflow-hidden font-sans select-none antialiased">
       {/* Top Global Header Bar with Access Ribbon */}
       <HeaderGlobal
         runState={runState}
@@ -240,6 +251,7 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
         isAIAgentOpen={isAIAgentOpen}
         onToggleAIAgent={toggleAIAgent}
         onOpenShortcuts={toggleShortcutsModal}
+        onSelectFile={handleSelectFile}
       />
 
       {/* Main 4-Column Layout with Interactive Resizers */}
@@ -274,8 +286,8 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
               onMouseDown={handleExplorerMouseDown}
               className={`w-1 cursor-col-resize hover:w-1.5 transition-all relative flex-shrink-0 group z-10 ${
                 activeResizer === "explorer"
-                  ? "bg-purple-500 shadow-sm shadow-purple-500/50"
-                  : "bg-[#2F343A]/40 hover:bg-purple-500/60"
+                  ? "bg-workspace-accent shadow-sm shadow-workspace-accent/50"
+                  : "bg-workspace-border/40 hover:bg-workspace-accent/60"
               }`}
               title="Drag to resize File Explorer"
             >
@@ -285,7 +297,7 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
         )}
 
         {/* Column 3 (Middle): Primary Workspace Area (Code Editor + Terminal) */}
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-[#0A0D10]">
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-workspace-bg">
           {/* Top Half: Code Editor Panel */}
           <CodeEditorPanel
             activeFile={activeFile}
@@ -305,8 +317,8 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
                 onMouseDown={handleTerminalMouseDown}
                 className={`h-1 cursor-row-resize hover:h-1.5 transition-all relative flex-shrink-0 group z-10 ${
                   activeResizer === "terminal"
-                    ? "bg-purple-500 shadow-sm shadow-purple-500/50"
-                    : "bg-[#2F343A]/60 hover:bg-purple-500/60"
+                    ? "bg-workspace-accent shadow-sm shadow-workspace-accent/50"
+                    : "bg-workspace-border/60 hover:bg-workspace-accent/60"
                 }`}
                 title="Drag to resize Terminal"
               >
@@ -317,6 +329,7 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
                 isOpen={isTerminalOpen}
                 onClose={() => setIsTerminalOpen(false)}
                 runState={runState}
+                logs={logs}
                 height={terminalHeight}
               />
             </>
@@ -331,8 +344,8 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
               onMouseDown={handleAIAgentMouseDown}
               className={`w-1 cursor-col-resize hover:w-1.5 transition-all relative flex-shrink-0 group z-10 ${
                 activeResizer === "aiAgent"
-                  ? "bg-purple-500 shadow-sm shadow-purple-500/50"
-                  : "bg-[#2F343A]/40 hover:bg-purple-500/60"
+                  ? "bg-workspace-accent shadow-sm shadow-workspace-accent/50"
+                  : "bg-workspace-border/40 hover:bg-workspace-accent/60"
               }`}
               title="Drag to resize AI Agent panel"
             >
@@ -344,6 +357,7 @@ export function WorkspaceLayout({ initialRepoName = "default" }: WorkspaceLayout
               onClose={() => setIsAIAgentOpen(false)}
               onSelectFile={handleSelectFile}
               runState={runState}
+              logs={logs}
               onStartTaskPrompt={handleStartTaskPrompt}
               onTriggerRepair={handleTriggerRepair}
               width={aiAgentWidth}

@@ -8,7 +8,7 @@ export default function RootWorkspaceLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="fixed inset-0 z-50 bg-[#0A0D10]">
+    <div className="fixed inset-0 z-50 bg-workspace-bg">
       {children}
     </div>
   );

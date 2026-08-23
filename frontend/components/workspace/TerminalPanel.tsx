@@ -34,10 +34,11 @@ interface TerminalPanelProps {
   isOpen: boolean;
   onClose: () => void;
   runState?: RunState;
+  logs?: string[];
   height?: number;
 }
 
-export function TerminalPanel({ isOpen, onClose, runState, height = 224 }: TerminalPanelProps) {
+export function TerminalPanel({ isOpen, onClose, runState, logs = [], height = 224 }: TerminalPanelProps) {
   const [activeTab, setActiveTab] = useState<"PROBLEMS" | "OUTPUT" | "DEBUG" | "TERMINAL" | "PORTS">("TERMINAL");
   const [activeSession, setActiveSession] = useState<"docker" | "node">("docker");
   const [isRestarting, setIsRestarting] = useState(false);
@@ -66,7 +67,7 @@ export function TerminalPanel({ isOpen, onClose, runState, height = 224 }: Termi
   return (
     <div
       style={{ height: `${height}px` }}
-      className="bg-[#0D1117] border-t border-[#21262D] flex flex-col text-[#E6EDF3] flex-shrink-0 font-mono select-none"
+      className="bg-[#0D1117] border-t border-[#21262D] flex flex-col text-workspace-text flex-shrink-0 font-mono select-none"
     >
       {/* Top Console Bar (VS Code / Antigravity IDE layout) */}
       <div className="h-8 bg-[#161B22] border-b border-[#21262D] flex items-center justify-between px-3 text-xs flex-shrink-0">
@@ -199,6 +200,30 @@ export function TerminalPanel({ isOpen, onClose, runState, height = 224 }: Termi
       {/* OUTPUT / VERIFICATION View Tab */}
       {activeTab === "OUTPUT" && (
         <div className="flex-1 overflow-y-auto p-3 font-mono text-xs text-zinc-200 bg-[#080B0E] space-y-2 leading-relaxed">
+          {logs.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-purple-300 font-semibold border-b border-[#21262D] pb-1">
+                <span>Verification Mesh Activity Log</span>
+              </div>
+              <div className="space-y-0.5 pb-2 border-b border-[#21262D]">
+                {logs.map((line, idx) => (
+                  <div
+                    key={idx}
+                    className={`text-[11px] ${
+                      /ERROR|FAIL/i.test(line)
+                        ? "text-rose-400"
+                        : /PASS|SUCCESS/i.test(line)
+                        ? "text-emerald-400"
+                        : "text-zinc-400"
+                    }`}
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="text-purple-300 font-semibold border-b border-[#21262D] pb-1 flex items-center justify-between">
             <span>Dynamic Test Runner Execution Output</span>
             <span className="text-[10px] text-zinc-500 font-mono">

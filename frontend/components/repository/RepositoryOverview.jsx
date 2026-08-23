@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardHeader } from '../common/Card';
 import { Badge } from '../common/Badge';
 import { Button } from '../common/Button';
-import Link from 'next/link';
+import { Modal } from '../common/Modal';
 import { PythonIcon, JavascriptIcon, TypescriptIcon, ReactIcon, JavaIcon } from '../common/LanguageIcons';
 import { 
   Star, 
@@ -43,6 +43,7 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
   const [findingsData, setFindingsData] = useState(null);
   const [featureData, setFeatureData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isFindingsModalOpen, setIsFindingsModalOpen] = useState(false);
 
   useEffect(() => {
     const fetchRealData = async () => {
@@ -336,7 +337,7 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
         <Card className="lg:col-span-1 flex flex-col">
           <div className="flex justify-between items-center mb-6">
             <h3 className="font-semibold text-slate-800 dark:text-slate-100 flex items-center"><ShieldCheck className="w-4 h-4 mr-2 text-green-500 dark:text-green-400" /> Health Breakdown</h3>
-            <Link href={`/repository/${repoName}/health`} className="text-xs text-blue-600 dark:text-blue-400 hover:underline cursor-pointer">Details &rarr;</Link>
+            <button onClick={() => setIsFindingsModalOpen(true)} className="text-xs text-blue-600 dark:text-blue-400 hover:underline cursor-pointer">Details &rarr;</button>
           </div>
           
           <div className="space-y-5 flex-1">
@@ -417,9 +418,9 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
                 })()}
                 
                 <div className="mt-auto pt-4">
-                  <Link href={`/repository/${repoName}/health`} className="w-full inline-flex justify-center items-center px-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-medium rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700/80 transition-colors">
+                  <button onClick={() => setIsFindingsModalOpen(true)} className="w-full inline-flex justify-center items-center px-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm font-medium rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700/80 transition-colors">
                     Review all findings
-                  </Link>
+                  </button>
                 </div>
               </>
             )}
@@ -427,6 +428,43 @@ export default function RepositoryOverview({ repoName, data: scanData }) {
         </Card>
 
       </div>
+
+      <Modal
+        isOpen={isFindingsModalOpen}
+        onClose={() => setIsFindingsModalOpen(false)}
+        title="All Findings"
+        titleIcon={<ShieldCheck className="w-5 h-5 text-slate-500 dark:text-slate-400" />}
+      >
+        {findings.length === 0 ? (
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            No findings recorded for this repository yet.
+          </p>
+        ) : (
+          <div className="space-y-3 max-h-[60vh] overflow-y-auto -mr-2 pr-2">
+            {findings.map((f, idx) => {
+              const severity = (f.severity || 'INFO').toUpperCase();
+              const variant = severity === 'CRITICAL' || severity === 'ERROR'
+                ? 'error'
+                : severity === 'WARNING'
+                ? 'warning'
+                : 'info';
+              return (
+                <div key={f.id || idx} className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <Badge variant={variant}>{severity}</Badge>
+                    {(f.file_path || f.file) && (
+                      <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">{f.file_path || f.file}</span>
+                    )}
+                  </div>
+                  <p className="text-sm text-slate-700 dark:text-slate-300">
+                    {f.title || f.message || f.description || 'Untitled finding'}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

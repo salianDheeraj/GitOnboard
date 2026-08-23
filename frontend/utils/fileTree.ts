@@ -88,3 +88,32 @@ export function mergeAncestorPaths(prev: Set<string>, filePath: string): Set<str
   }
   return changed ? next : prev;
 }
+
+export interface FlatTreeRow {
+  node: FileTreeNode;
+  depth: number;
+}
+
+/**
+ * Flattens the tree into the exact ordered list of rows that would be
+ * visible given `expandedPaths`, in the same pre-order a recursive renderer
+ * would produce. Used to feed a windowed/virtualized list — the API returns
+ * the full hierarchy up front (no per-directory paging), so this walk (and
+ * the DOM node count it drives) is the only lever the frontend has for
+ * keeping large trees cheap to render.
+ */
+export function flattenVisibleTree(root: FileTreeNode, expandedPaths: Set<string>): FlatTreeRow[] {
+  const rows: FlatTreeRow[] = [];
+
+  const walk = (node: FileTreeNode, depth: number) => {
+    rows.push({ node, depth });
+    if (node.type === "directory" && expandedPaths.has(node.path) && node.children) {
+      for (const child of node.children) {
+        walk(child, depth + 1);
+      }
+    }
+  };
+
+  walk(root, 0);
+  return rows;
+}

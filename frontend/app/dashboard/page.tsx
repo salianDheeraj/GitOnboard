@@ -9,8 +9,10 @@ import { Modal } from '@/components/common/Modal';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Card } from '@/components/common/Card';
 import { Badge } from '@/components/common/Badge';
+import { Toast } from '@/components/common/Toast';
 import { Plus, FolderGit2 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
+import { getRepoScanProgress } from '@/utils/repoScanStatus';
 
 function DashboardContent() {
   const { user, isLoading: authLoading, isAuthenticated } = useAuth();
@@ -25,6 +27,7 @@ function DashboardContent() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [toastMessage, setToastMessage] = useState('');
 
   const searchParams = useSearchParams();
   const searchQuery = searchParams.get('search') || '';
@@ -113,7 +116,7 @@ function DashboardContent() {
       fetchRepos();
     } catch (err) {
       console.error("Failed to re-analyze repo", err);
-      alert("Error re-analyzing repository.");
+      setToastMessage("Error re-analyzing repository.");
     } finally {
       setAnalyzingRepo(null);
     }
@@ -127,7 +130,7 @@ function DashboardContent() {
     } catch (err) {
       console.error("Failed to cancel repo analysis", err);
       if ((err as any).message !== "No active analysis to cancel.") {
-        alert("Error canceling repository analysis: " + (err as any).message);
+        setToastMessage("Error canceling repository analysis: " + (err as any).message);
       }
     } finally {
       fetchRepos();
@@ -231,17 +234,9 @@ function DashboardContent() {
                   )}
                   
                   {['Queued', 'Downloading', 'Analyzing', 'Saving', 'Processing'].includes(repo.status) || ['Queued', 'Downloading', 'Analyzing', 'Saving'].includes(repo.job_status) ? (() => {
-                    const statusMap: Record<string, number> = {
-                      "Queued": 10,
-                      "Downloading": 30,
-                      "Analyzing": 60,
-                      "Saving": 90,
-                      "Completed": 100,
-                      "Failed": 0
-                    };
                     const currentStatus = repo.job_status || "Queued";
-                    const progress = statusMap[currentStatus] || 10;
-                    
+                    const progress = getRepoScanProgress(currentStatus);
+
                     return (
                       <div className="mt-4">
                         <div className="flex justify-between text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
@@ -354,6 +349,8 @@ function DashboardContent() {
         error={deleteError}
         variant="danger"
       />
+
+      <Toast message={toastMessage} variant="error" onDismiss={() => setToastMessage('')} />
     </div>
     </div>
   );

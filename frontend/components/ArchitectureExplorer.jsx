@@ -13,20 +13,21 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from 'dagre';
+import { Package, Folder as FolderIcon, File as FileIcon, Box, Zap, Circle } from 'lucide-react';
 
 // --- Custom Node ---
 const ArchitectureNode = ({ data, selected }) => {
   const isExpandable = data.has_children;
   const isExpanded = data.expanded;
-  
+
   const iconMap = {
-    repository: '📦',
-    folder: '📁',
-    file: '📄',
-    class: '🧩',
-    function: '⚡'
+    repository: Package,
+    folder: FolderIcon,
+    file: FileIcon,
+    class: Box,
+    function: Zap
   };
-  
+
   const bgMap = {
     repository: 'bg-gray-100 dark:bg-slate-800',
     folder: 'bg-yellow-50 dark:bg-yellow-950/60',
@@ -38,9 +39,12 @@ const ArchitectureNode = ({ data, selected }) => {
   return (
     <div className={`px-3 py-2 shadow-sm rounded-md border-2 ${bgMap[data.type] || 'bg-white dark:bg-slate-900'} ${selected ? 'border-blue-500 shadow-md' : 'border-gray-300 dark:border-slate-700'} flex items-center gap-2 min-w-[160px] transition-colors`}>
       <Handle type="target" position={Position.Top} className="opacity-0" />
-      
-      <span className="text-xl">{iconMap[data.type] || '📌'}</span>
-      
+
+      {(() => {
+        const NodeIcon = iconMap[data.type] || Circle;
+        return <NodeIcon className="w-4 h-4 text-gray-500 dark:text-slate-400 flex-shrink-0" />;
+      })()}
+
       <div className="flex-grow flex flex-col overflow-hidden">
         <span className="font-mono text-sm font-semibold text-gray-800 dark:text-slate-100 truncate max-w-[140px]" title={data.name}>
           {data.name}

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { RunState } from "@/types/workspace";
 import { getFileContent, saveFileContent } from "@/services/repositoryApi";
+import { Button } from "@/components/common/Button";
 
 interface CodeEditorPanelProps {
   activeFile: string;
@@ -200,9 +201,9 @@ export function CodeEditorPanel({
   const patchedCode = runState?.rawDiff || fileContent;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-[#0A0D10] text-[#E6EDF3] border-b border-[#2F343A]">
+    <div className="flex-1 flex flex-col min-h-0 bg-workspace-bg text-workspace-text border-b border-workspace-border">
       {/* Top Control Bar */}
-      <div className="h-9 bg-[#14181E] border-b border-[#2F343A] flex items-center justify-between px-2 select-none flex-shrink-0">
+      <div className="h-9 bg-workspace-surface border-b border-workspace-border flex items-center justify-between px-2 select-none flex-shrink-0">
         {/* Open Tabs */}
         <div className="flex items-center gap-1 overflow-x-auto scrollbar-none max-w-[65%]">
           {openTabs.length > 0 ? (
@@ -215,18 +216,18 @@ export function CodeEditorPanel({
                   onClick={() => onSelectFile(tabPath)}
                   className={`h-7 px-2.5 rounded-t flex items-center gap-2 text-xs font-mono border-t border-x cursor-pointer transition-colors ${
                     isActive
-                      ? "bg-[#0A0D10] border-[#2F343A] text-purple-300 font-medium"
-                      : "bg-[#14181E] border-transparent text-[#8B949E] hover:text-[#E6EDF3] hover:bg-[#1E222A]"
+                      ? "bg-workspace-bg border-workspace-border text-workspace-accent font-medium"
+                      : "bg-workspace-surface border-transparent text-workspace-text-muted hover:text-workspace-text hover:bg-workspace-surface-raised"
                   }`}
                 >
-                  <FileCode className="w-3.5 h-3.5 text-purple-400" />
+                  <FileCode className="w-4 h-4 text-workspace-accent" />
                   <span>{basename}</span>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       onCloseTab(tabPath);
                     }}
-                    className="hover:text-white p-0.5 rounded text-[#8B949E]"
+                    className="hover:text-white p-0.5 rounded text-workspace-text-muted"
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -234,46 +235,44 @@ export function CodeEditorPanel({
               );
             })
           ) : (
-            <div className="text-[11px] text-[#8B949E] italic px-2">No files open</div>
+            <div className="text-[11px] text-workspace-text-muted italic px-2">No files open</div>
           )}
         </div>
 
         {/* Right Actions: Save Button & Mode Switcher */}
         <div className="flex items-center gap-2">
           {/* Save Button */}
-          <button
+          <Button
+            variant={saveSuccess ? "primary" : "soft"}
+            size="sm"
             onClick={handleSave}
             disabled={!activeFile || isSaving || Boolean(fileError)}
-            className={`px-2 py-0.5 rounded text-xs font-semibold flex items-center gap-1 transition-all ${
-              saveSuccess
-                ? "bg-emerald-950 text-emerald-300 border border-emerald-500/40"
-                : !activeFile || Boolean(fileError)
-                ? "opacity-40 cursor-not-allowed bg-purple-950/20 text-[#8B949E] border border-[#2F343A]"
-                : "bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 border border-purple-500/40"
-            }`}
+            className={saveSuccess ? "!bg-emerald-950 !text-emerald-300 !border !border-emerald-500/40" : ""}
+            icon={
+              isSaving ? (
+                <RefreshCw className="w-3 h-3 animate-spin" />
+              ) : saveSuccess ? (
+                <Check className="w-3 h-3 text-emerald-400" />
+              ) : (
+                <Save className="w-3 h-3" />
+              )
+            }
             title="Save File (Ctrl+S)"
           >
-            {isSaving ? (
-              <RefreshCw className="w-3 h-3 animate-spin text-purple-300" />
-            ) : saveSuccess ? (
-              <Check className="w-3 h-3 text-emerald-400" />
-            ) : (
-              <Save className="w-3 h-3" />
-            )}
-            <span>{saveSuccess ? "Saved" : "Save"}</span>
-          </button>
+            {saveSuccess ? "Saved" : "Save"}
+          </Button>
 
           {/* Mode Switcher: [ Source Code ] vs [ Agent Diff ] */}
-          <div className="flex items-center gap-1 bg-[#0A0D10] border border-[#2F343A] p-0.5 rounded-lg text-xs font-mono">
+          <div className="flex items-center gap-1 bg-workspace-bg border border-workspace-border p-0.5 rounded-lg text-xs font-mono">
             <button
               onClick={() => setEditorMode("source")}
               className={`px-2 py-0.5 rounded flex items-center gap-1 transition-all ${
                 editorMode === "source"
-                  ? "bg-purple-600/30 text-purple-300 font-semibold border border-purple-500/40 shadow-sm"
-                  : "text-[#8B949E] hover:text-[#E6EDF3]"
+                  ? "bg-workspace-accent/30 text-workspace-accent font-semibold border border-workspace-accent/40 shadow-sm"
+                  : "text-workspace-text-muted hover:text-workspace-text"
               }`}
             >
-              <Code2 className="w-3.5 h-3.5" />
+              <Code2 className="w-4 h-4" />
               <span>Source Code</span>
             </button>
 
@@ -281,11 +280,11 @@ export function CodeEditorPanel({
               onClick={() => setEditorMode("diff")}
               className={`px-2 py-0.5 rounded flex items-center gap-1 transition-all ${
                 editorMode === "diff"
-                  ? "bg-purple-600/30 text-purple-300 font-semibold border border-purple-500/40 shadow-sm"
-                  : "text-[#8B949E] hover:text-[#E6EDF3]"
+                  ? "bg-workspace-accent/30 text-workspace-accent font-semibold border border-workspace-accent/40 shadow-sm"
+                  : "text-workspace-text-muted hover:text-workspace-text"
               }`}
             >
-              <FileDiff className="w-3.5 h-3.5" />
+              <FileDiff className="w-4 h-4" />
               <span>Agent Diff</span>
             </button>
           </div>
@@ -293,17 +292,17 @@ export function CodeEditorPanel({
       </div>
 
       {/* Breadcrumb Path Bar */}
-      <div className="h-6 bg-[#0A0D10] border-b border-[#2F343A]/60 px-3 flex items-center gap-1 text-[11px] text-[#8B949E] font-mono select-none flex-shrink-0">
+      <div className="h-6 bg-workspace-bg border-b border-workspace-border/60 px-3 flex items-center gap-1 text-[11px] text-workspace-text-muted font-mono select-none flex-shrink-0">
         <span>{repoName}</span>
-        <ChevronRight className="w-3 h-3 text-[#2F343A]" />
+        <ChevronRight className="w-3 h-3 text-workspace-border" />
         {activeFile ? (
           <>
             <span>{activeFile.split("/").slice(0, -1).join("/") || "."}</span>
-            <ChevronRight className="w-3 h-3 text-[#2F343A]" />
-            <span className="text-purple-400 font-semibold">{getFileBasename(activeFile)}</span>
+            <ChevronRight className="w-3 h-3 text-workspace-border" />
+            <span className="text-workspace-accent font-semibold">{getFileBasename(activeFile)}</span>
           </>
         ) : (
-          <span className="text-[#8B949E] italic">(No active file)</span>
+          <span className="text-workspace-text-muted italic">(No active file)</span>
         )}
 
         {runState?.report?.defects && runState.report.defects.length > 0 && (
@@ -315,40 +314,41 @@ export function CodeEditorPanel({
       </div>
 
       {/* Monaco Editor / Loading Skeleton / Empty State / Explicit Error Card */}
-      <div className="flex-1 min-h-0 relative bg-[#0A0D10]">
+      <div className="flex-1 min-h-0 relative bg-workspace-bg">
         {!activeFile ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0A0D10] text-[#8B949E] text-xs font-mono p-6 select-none">
-            <div className="w-12 h-12 rounded-xl bg-[#14181E] border border-[#2F343A] flex items-center justify-center mb-3 text-purple-400">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-workspace-bg text-workspace-text-muted text-xs font-mono p-6 select-none">
+            <div className="w-12 h-12 rounded-xl bg-workspace-surface border border-workspace-border flex items-center justify-center mb-3 text-workspace-accent">
               <FileCode className="w-6 h-6" />
             </div>
-            <div className="text-sm font-semibold text-[#E6EDF3] mb-1">No File Selected</div>
-            <div className="text-xs text-[#8B949E] max-w-sm text-center">
+            <div className="text-sm font-semibold text-workspace-text mb-1">No File Selected</div>
+            <div className="text-xs text-workspace-text-muted max-w-sm text-center">
               Select a file from the repository explorer on the left or search symbols (⌘K) to open code in Monaco.
             </div>
           </div>
         ) : loadingFile ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#0A0D10] text-[#8B949E] text-xs font-mono">
+          <div className="absolute inset-0 flex items-center justify-center bg-workspace-bg text-workspace-text-muted text-xs font-mono">
             <div className="flex items-center gap-2">
-              <RefreshCw className="w-4 h-4 animate-spin text-purple-400" />
-              <span>Loading {getFileBasename(activeFile)} from Azurite Storage...</span>
+              <RefreshCw className="w-4 h-4 animate-spin text-workspace-accent" />
+              <span>Loading {getFileBasename(activeFile)}...</span>
             </div>
           </div>
         ) : fileError ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0A0D10] text-rose-300 text-xs font-mono p-6">
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-workspace-bg text-rose-300 text-xs font-mono p-6">
             <div className="w-12 h-12 rounded-xl bg-rose-950/30 border border-rose-500/40 flex items-center justify-center mb-3 text-rose-400">
               <AlertTriangle className="w-6 h-6" />
             </div>
             <div className="text-sm font-semibold text-rose-200 mb-1">Failed to Load File</div>
-            <div className="text-xs text-rose-400/90 max-w-md text-center mb-4 bg-[#14181E] p-3 rounded border border-rose-500/30">
+            <div className="text-xs text-rose-400/90 max-w-md text-center mb-4 bg-workspace-surface p-3 rounded border border-rose-500/30">
               {fileError}
             </div>
-            <button
+            <Button
+              variant="soft"
+              size="sm"
               onClick={fetchActiveFile}
-              className="px-3 py-1.5 rounded bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 border border-purple-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all"
+              icon={<RefreshCw className="w-4 h-4" />}
             >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Retry Load</span>
-            </button>
+              Retry Load
+            </Button>
           </div>
         ) : editorMode === "diff" ? (
           <DiffEditor

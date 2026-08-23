@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect } from "react";
 import {
   ArrowUp,
   Bot,
+  CheckCircle2,
   Compass,
   HelpCircle,
   Info,
@@ -11,12 +12,70 @@ import {
   RotateCcw,
   Sparkles,
   User,
+  XCircle,
   Zap,
 } from "lucide-react";
-import { WorkspaceSnapshot } from "@/types/workspace";
+import { EventStreamItem, WorkspaceSnapshot } from "@/types/workspace";
+
+// Pipeline milestones worth surfacing in the chat thread as they happen.
+// Deliberately excludes chatty low-signal events (AGENT_THINKING, TOOL_CALL_STARTED, etc.)
+// so the conversation reads as a status timeline, not a debug log.
+const MILESTONE_EVENT_TYPES = new Set([
+  "STARTED",
+  "CONTRACT_GENERATED",
+  "PLANNING_STARTED",
+  "PLANNING_COMPLETED",
+  "PLANNING_FAILED",
+  "PLAN_READY_FOR_APPROVAL",
+  "PLAN_APPROVED",
+  "PLAN_REJECTED",
+  "TASK_STARTED",
+  "AGENT_TASK_STARTED",
+  "TASK_EXECUTION_COMPLETED",
+  "TASK_EXECUTION_FAILED",
+  "TASK_PASSED",
+  "TASK_FAILED",
+  "TASK_BLOCKED",
+  "VERIFICATION_STARTED",
+  "VERIFICATION_PASSED",
+  "VERIFICATION_FAILED",
+  "VERIFICATION_COMPLETED",
+  "REPAIR_STARTED",
+  "REPAIR_ATTEMPT_STARTED",
+  "REPAIR_PASSED",
+  "REPAIR_FAILED",
+  "REPAIR_BLOCKED",
+  "ACTION_APPROVAL_REQUESTED",
+  "ACTION_APPROVED",
+  "ACTION_REJECTED",
+  "CANCELLATION_REQUESTED",
+  "CANCELLED",
+]);
+
+const FAILURE_EVENT_TYPES = new Set([
+  "PLANNING_FAILED",
+  "PLAN_REJECTED",
+  "TASK_EXECUTION_FAILED",
+  "TASK_FAILED",
+  "TASK_BLOCKED",
+  "VERIFICATION_FAILED",
+  "REPAIR_FAILED",
+  "REPAIR_BLOCKED",
+  "ACTION_REJECTED",
+  "CANCELLED",
+]);
+
+const SUCCESS_EVENT_TYPES = new Set([
+  "PLAN_APPROVED",
+  "TASK_PASSED",
+  "VERIFICATION_PASSED",
+  "REPAIR_PASSED",
+  "ACTION_APPROVED",
+]);
 
 interface ChatPanelProps {
   snapshot?: WorkspaceSnapshot | null;
+  logs?: string[];
   onStartRun?: (prompt: string) => void;
   onApprovePlan?: () => void;
   onRejectPlan?: (reason?: string) => void;
@@ -27,6 +86,12 @@ interface ChatPanelProps {
   isLoading?: boolean;
 }
 
+// The hook seeds `logs` with two boilerplate boot lines ("Workspace
+// initialized...", "Multi-Vector Verification Mesh stand-by.") on mount and
+// on every repo switch. Never surface those in the thread — only real
+// milestones from a task the user actually started.
+const BOOTSTRAP_LOG_COUNT = 2;
+
 interface IntentData {
   intent: string;
   confidence: number;
@@ -36,22 +101,100 @@ interface IntentData {
 
 interface ChatMessage {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   text: string;
   intent?: IntentData;
   timestamp: string;
+  isFailure?: boolean;
+  isSuccess?: boolean;
+  showViewPlan?: boolean;
 }
 
-export function ChatPanel({ onStartRun }: ChatPanelProps) {
+export function ChatPanel({ snapshot, logs = [], onStartRun, onNavigateToPlan }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputPrompt, setInputPrompt] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const seenEventIds = useRef<Set<string>>(new Set());
+  const processedLogCount = useRef(BOOTSTRAP_LOG_COUNT);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Stream real pipeline progress (contract synthesis, plan, task execution,
+  // verification, repair) into the conversation as the background agent run
+  // advances, so the chat never goes silent after the user's own message.
+  useEffect(() => {
+    const events: EventStreamItem[] = snapshot?.latest_events || [];
+    if (events.length === 0) return;
+
+    const newMilestones = events.filter(
+      (e) =>
+        e.event_id &&
+        !seenEventIds.current.has(e.event_id) &&
+        MILESTONE_EVENT_TYPES.has(e.event_type)
+    );
+    if (newMilestones.length === 0) {
+      events.forEach((e) => {
+        if (e.event_id) seenEventIds.current.add(e.event_id);
+      });
+      return;
+    }
+
+    const toAppend: ChatMessage[] = newMilestones.map((e) => {
+      seenEventIds.current.add(e.event_id);
+      return {
+        id: `event-${e.event_id}`,
+        role: "system",
+        text: e.message || e.event_type,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        isFailure: FAILURE_EVENT_TYPES.has(e.event_type),
+        isSuccess: SUCCESS_EVENT_TYPES.has(e.event_type),
+        showViewPlan: e.event_type === "PLAN_READY_FOR_APPROVAL",
+      };
+    });
+
+    // Mark any already-present events as seen too, so a snapshot refetch
+    // (which re-sends the full latest_events window) doesn't re-append them.
+    events.forEach((e) => {
+      if (e.event_id) seenEventIds.current.add(e.event_id);
+    });
+
+    setMessages((prev) => [...prev, ...toAppend]);
+  }, [snapshot?.latest_events]);
+
+  // Stream the Multi-Vector Verification Mesh's own log (Run Verification /
+  // repair loop, driven by useVerificationWorkspace) into the same thread,
+  // so a requirement run has one visible beginning-middle-end narrative
+  // instead of needing a separate tab to find out what happened.
+  useEffect(() => {
+    if (logs.length < processedLogCount.current) {
+      // Repo switch reset the log array back to its two boot lines.
+      processedLogCount.current = BOOTSTRAP_LOG_COUNT;
+      return;
+    }
+    if (logs.length <= processedLogCount.current) return;
+
+    const newLines = logs.slice(processedLogCount.current);
+    processedLogCount.current = logs.length;
+
+    const toAppend: ChatMessage[] = newLines.map((line, idx) => {
+      const isFailure = /ERROR|FAIL/i.test(line);
+      const isSuccess = /VERIFICATION PASS|REPAIR SUCCESS/i.test(line);
+      return {
+        id: `verification-log-${processedLogCount.current}-${idx}`,
+        role: "system",
+        text: line.replace(/^\[[^\]]*\]\s*/, ""),
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        isFailure,
+        isSuccess,
+      };
+    });
+
+    setMessages((prev) => [...prev, ...toAppend]);
+  }, [logs]);
 
   const testPresets = [
     { label: "Greeting", prompt: "hi", intent: "chat", icon: Sparkles },
@@ -257,7 +400,36 @@ export function ChatPanel({ onStartRun }: ChatPanelProps) {
         ) : (
           messages.map((msg) => (
             <div key={msg.id} className="space-y-2">
-              {msg.role === "user" ? (
+              {msg.role === "system" ? (
+                /* Pipeline Status / Event Log Message */
+                <div
+                  className={`flex items-center gap-2 pl-1 text-[11px] font-mono ${
+                    msg.isFailure
+                      ? "text-rose-400"
+                      : msg.isSuccess
+                      ? "text-emerald-400"
+                      : "text-zinc-500"
+                  }`}
+                >
+                  {msg.isFailure ? (
+                    <XCircle className="w-3 h-3 shrink-0" />
+                  ) : msg.isSuccess ? (
+                    <CheckCircle2 className="w-3 h-3 shrink-0" />
+                  ) : (
+                    <span className="w-1.5 h-1.5 rounded-full bg-current shrink-0" />
+                  )}
+                  <span className="flex-1">{msg.text}</span>
+                  {msg.showViewPlan && onNavigateToPlan && (
+                    <button
+                      onClick={onNavigateToPlan}
+                      className="text-purple-400 hover:text-purple-300 underline underline-offset-2 shrink-0"
+                    >
+                      View Plan →
+                    </button>
+                  )}
+                  <span className="text-zinc-600 shrink-0">{msg.timestamp}</span>
+                </div>
+              ) : msg.role === "user" ? (
                 /* User Message */
                 <div className="flex gap-2.5 bg-[#18181B] p-3 rounded-xl border border-[#27272A] shadow-sm">
                   <div className="w-6 h-6 rounded-full bg-purple-600 text-white flex items-center justify-center shrink-0 text-xs font-semibold">

@@ -1,84 +1,52 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { WorkspaceLayout } from "@/components/workspace/WorkspaceLayout";
 import { useAuth } from "@/context/AuthContext";
+import { useResolveRepoName } from "@/hooks/useResolveRepoName";
 
-function RootWorkspaceContent() {
+// Legacy entry point — redirects to the canonical workspace route,
+// /repository/{repoName}/workspace, which keeps repo context in the URL.
+function RedirectToCanonicalWorkspace() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryRepo = searchParams.get("repo");
   const { isLoading: authLoading, isAuthenticated } = useAuth();
-  const [targetRepo, setTargetRepo] = useState<string | null>(queryRepo);
-  const [loading, setLoading] = useState<boolean>(true);
+  const { repoName, isLoading: repoLoading } = useResolveRepoName(queryRepo);
 
   useEffect(() => {
-    async function initWorkspace() {
-      if (authLoading) return;
-      if (!isAuthenticated) {
-        router.replace("/");
-        return;
-      }
-
-      // 2. Resolve active repository
-      if (queryRepo) {
-        setTargetRepo(queryRepo);
-        setLoading(false);
-        return;
-      }
-
-      try {
-        const res = await fetch("/api/repos");
-        if (res.ok) {
-          const data = await res.json();
-          const repoList = Array.isArray(data) ? data : (data?.repositories || []);
-          if (repoList.length > 0) {
-            const first = repoList[0];
-            const firstRepo = first.project_name || first.name || (first.url ? first.url.split("/").pop().replace(".git", "") : "default");
-            setTargetRepo(firstRepo);
-            setLoading(false);
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn("Failed to fetch repositories:", err);
-      }
-
-      setTargetRepo("default");
-      setLoading(false);
+    if (authLoading) return;
+    if (!isAuthenticated) {
+      router.replace("/");
+      return;
     }
+    if (repoLoading || !repoName) return;
+    router.replace(`/repository/${encodeURIComponent(repoName)}/workspace`);
+  }, [authLoading, isAuthenticated, repoLoading, repoName, router]);
 
-    initWorkspace();
-  }, [queryRepo, authLoading, isAuthenticated, router]);
-
-  if (loading) {
-    return (
-      <div className="h-screen w-screen bg-[#0A0D10] text-[#E6EDF3] flex items-center justify-center font-mono text-sm">
-        <div className="flex items-center gap-3">
-          <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-          <span>Verifying authentication and resolving workspace...</span>
-        </div>
+  return (
+    <div className="h-screen w-screen bg-workspace-bg text-workspace-text flex items-center justify-center font-mono text-sm">
+      <div className="flex items-center gap-3">
+        <div className="w-4 h-4 border-2 border-workspace-accent border-t-transparent rounded-full animate-spin" />
+        <span>Redirecting to workspace...</span>
       </div>
-    );
-  }
-
-  return <WorkspaceLayout initialRepoName={targetRepo || "default"} />;
+    </div>
+  );
 }
 
 export default function RootWorkspacePage() {
   return (
     <Suspense
       fallback={
-        <div className="h-screen w-screen bg-[#0A0D10] text-[#E6EDF3] flex items-center justify-center font-mono text-sm">
+        <div className="h-screen w-screen bg-workspace-bg text-workspace-text flex items-center justify-center font-mono text-sm">
           <div className="flex items-center gap-3">
-            <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+            <div className="w-4 h-4 border-2 border-workspace-accent border-t-transparent rounded-full animate-spin" />
             <span>Loading workspace...</span>
           </div>
         </div>
       }
     >
-      <RootWorkspaceContent />
+      <RedirectToCanonicalWorkspace />
     </Suspense>
   );
 }

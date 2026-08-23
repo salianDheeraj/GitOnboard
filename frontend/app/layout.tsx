@@ -30,7 +30,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full" suppressHydrationWarning>
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased h-full flex flex-col overflow-hidden bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-200`}>
+      <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased h-full flex flex-col overflow-hidden bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-200`}>
         <ThemeProvider attribute="class" defaultTheme="system" disableTransitionOnChange enableSystem>
           <AuthProvider>
             <Suspense fallback={<div className="h-16 border-b border-slate-200 dark:border-slate-800" />}><Header /></Suspense>

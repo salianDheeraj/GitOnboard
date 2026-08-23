@@ -301,7 +301,7 @@ export function InteractiveTerminal({ runId }: InteractiveTerminalProps) {
 
   return (
     <div
-      className="relative flex-1 min-h-0 w-full h-full overflow-hidden cursor-text bg-[#0A0D10] flex flex-col p-2.5 pb-6"
+      className="relative flex-1 min-h-0 w-full h-full overflow-hidden cursor-text bg-workspace-bg flex flex-col p-2.5 pb-6"
       onClick={() => activeTermRef.current?.focus()}
     >
       <div
@@ -310,7 +310,7 @@ export function InteractiveTerminal({ runId }: InteractiveTerminalProps) {
         onClick={() => activeTermRef.current?.focus()}
       />
       {status !== "open" && (
-        <div className="absolute top-1.5 right-2 text-[10px] font-mono px-1.5 py-0.5 rounded bg-[#14181E] border border-[#2F343A] text-amber-300/90 pointer-events-none z-10">
+        <div className="absolute top-1.5 right-2 text-[10px] font-mono px-1.5 py-0.5 rounded bg-workspace-surface border border-workspace-border text-amber-300/90 pointer-events-none z-10">
           {status === "connecting" && "connecting to shell…"}
           {status === "closed" && "disconnected — reconnecting…"}
           {status === "error" && "connection error — retrying…"}
