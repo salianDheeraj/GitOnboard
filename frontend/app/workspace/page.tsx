@@ -3,16 +3,25 @@
 import React, { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { WorkspaceLayout } from "@/components/workspace/WorkspaceLayout";
+import { useAuth } from "@/context/AuthContext";
 
 function RootWorkspaceContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryRepo = searchParams.get("repo");
+  const { isLoading: authLoading, isAuthenticated } = useAuth();
   const [targetRepo, setTargetRepo] = useState<string | null>(queryRepo);
-  const [loading, setLoading] = useState<boolean>(!queryRepo);
+  const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    async function resolveRepo() {
+    async function initWorkspace() {
+      if (authLoading) return;
+      if (!isAuthenticated) {
+        router.replace("/");
+        return;
+      }
+
+      // 2. Resolve active repository
       if (queryRepo) {
         setTargetRepo(queryRepo);
         setLoading(false);
@@ -40,15 +49,15 @@ function RootWorkspaceContent() {
       setLoading(false);
     }
 
-    resolveRepo();
-  }, [queryRepo, router]);
+    initWorkspace();
+  }, [queryRepo, authLoading, isAuthenticated, router]);
 
   if (loading) {
     return (
       <div className="h-screen w-screen bg-[#0A0D10] text-[#E6EDF3] flex items-center justify-center font-mono text-sm">
         <div className="flex items-center gap-3">
           <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-          <span>Resolving active repository...</span>
+          <span>Verifying authentication and resolving workspace...</span>
         </div>
       </div>
     );

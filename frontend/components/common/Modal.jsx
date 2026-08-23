@@ -30,12 +30,12 @@ export function Modal({ isOpen, onClose, title, titleIcon, hideCloseButton = fal
   useEffect(() => {
     if (isOpen) {
       document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = 'unset';
+      };
     } else {
       document.body.style.overflow = 'unset';
     }
-    return () => {
-      document.body.style.overflow = 'unset';
-    };
   }, [isOpen]);
 
   // Escape-to-close + focus management: move focus into the dialog when it
@@ -59,7 +59,7 @@ export function Modal({ isOpen, onClose, title, titleIcon, hideCloseButton = fal
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onClose?.();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
