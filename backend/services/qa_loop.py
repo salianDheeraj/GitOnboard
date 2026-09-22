@@ -242,7 +242,35 @@ class QALoop:
                 )
                 llm_response = await self.llm_service.generate(request)
                 logger.debug(f"[QALoop] Turn {turn_index}: LLM response ({len(llm_response.content)} chars)")
+                self._context_overflow_retries = 0  # Reset retry counter on success
             except Exception as e:
+                err_str = str(e).lower()
+                is_context_overflow = (
+                    "exceeds the available context size" in err_str
+                    or "exceed_context_size_error" in err_str
+                    or "maximum context length" in err_str
+                    or "context length exceeded" in err_str
+                )
+                retries = getattr(self, "_context_overflow_retries", 0)
+                if is_context_overflow and retries < 2:
+                    self._context_overflow_retries = retries + 1
+                    logger.warning(f"[QALoop] Context overflow detected at turn {turn_index}. Pruning observations and continuing loop (retry {self._context_overflow_retries}/2)...")
+
+                    # Prune large tool observation bodies in messages to save tokens
+                    for msg in messages:
+                        c = msg.get("content", "")
+                        if len(c) > 600:
+                            msg["content"] = c[:300] + "\n... [Observation trimmed to recover from context overflow] ..."
+
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM WARNING: Context window limit reached. Older tool outputs were trimmed to recover context. "
+                            "Do not attempt to read full files; use narrow line ranges (start_line, end_line) or provide your final answer based on observed code.]"
+                        )
+                    })
+                    continue
+
                 logger.error(f"[QALoop] LLM call failed: {e}", exc_info=True)
                 result.stop_reason = StopReason.MODEL_ERROR
                 result.answer = f"[ERROR] LLM call failed: {str(e)}"

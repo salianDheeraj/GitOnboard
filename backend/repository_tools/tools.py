@@ -139,9 +139,48 @@ class RepositoryToolLayer:
 
             # Fetch from blob storage
             raw_text = storage.get_object_text(matching_blob)
-            lines = raw_text.splitlines(keepends=True)
+            from backend.intelligence.notebook import resolve_source_document
+            doc = resolve_source_document(clean_path, raw_text)
+            resolved_text = doc.source if not doc.conversion_error else raw_text
+
+            lines = resolved_text.splitlines(keepends=True)
             total_lines = len(lines)
+
+            # Context overflow protection:
+            # If the LLM did not specify line boundaries and the file is large,
+            # do not dump the whole file into the context; guide the LLM to use line limits.
+            if end_line is None and total_lines > 150:
+                return {
+                    "path": clean_path,
+                    "total_lines": total_lines,
+                    "error": "context_overflow_protection",
+                    "message": (
+                        f"Refusing full file read: '{clean_path}' has {total_lines} lines. "
+                        f"Reading the entire file without line boundaries will cause context overflow and crash the session. "
+                        f"Please call 'read_file' with specific 'start_line' and 'end_line' (e.g. start_line=1, end_line=100), "
+                        f"or use 'search_code' / 'get_file_outline' to locate the relevant section."
+                    ),
+                    "suggested_action": "Call read_file specifying a line range (max 150 lines)."
+                }
+
             s, e = clamp_line_range(total_lines, start_line, end_line)
+
+            # If the requested line range itself is excessively large (e.g. > 250 lines):
+            if (e - s + 1) > 250:
+                return {
+                    "path": clean_path,
+                    "start_line": s,
+                    "end_line": e,
+                    "total_lines": total_lines,
+                    "error": "context_overflow_protection",
+                    "message": (
+                        f"The requested line range ({s}-{e}) spans {e - s + 1} lines, which exceeds "
+                        f"the safe read limit (250 lines) to prevent context overflow. "
+                        f"Please narrow your line range (e.g. start_line={s}, end_line={min(s + 150, e)})."
+                    ),
+                    "suggested_action": f"Call read_file with start_line={s}, end_line={min(s + 150, e)}."
+                }
+
             selected_lines = lines[s - 1 : e]
             numbered_content = "".join(f"{s + idx:4d} | {line}" for idx, line in enumerate(selected_lines))
 
@@ -437,7 +476,11 @@ class RepositoryToolLayer:
                 break
 
             try:
-                text = storage.get_object_text(f_rec.blob_name)
+                raw_text = storage.get_object_text(f_rec.blob_name)
+                from backend.intelligence.notebook import resolve_source_document
+                doc = resolve_source_document(f_rec.path, raw_text)
+                text = doc.source if not doc.conversion_error else raw_text
+
                 matches_in_file = 0
                 for line_idx, line in enumerate(text.splitlines(), start=1):
                     if pattern.search(line):

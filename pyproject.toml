@@ -32,6 +32,7 @@ dependencies = [
     "langgraph>=1.2.11",
     "tokenizers>=0.23.0",
     "qwen-tokenizer>=0.3.0",
+    "jupytext>=1.19.5",
 ]
 
 [tool.ruff]

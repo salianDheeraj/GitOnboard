@@ -151,7 +151,7 @@ def build_analysis_service(
         max_tool_calls=10,
         max_command_executions=0,
         max_execution_seconds=180,
-        max_observation_bytes=256000,
+        max_observation_bytes=32000,
         max_repeated_tool_calls=3,
     )
 

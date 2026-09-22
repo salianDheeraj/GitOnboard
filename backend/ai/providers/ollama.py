@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b-instruct")
-DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
+DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX") or os.environ.get("MODEL_LOCAL_MAX_TOKENS") or "32768")
 
 
 class OllamaProvider:
@@ -31,13 +31,14 @@ class OllamaProvider:
     def _build_body(self, request: LLMRequest, force_json: bool = False) -> Dict[str, Any]:
         # Respect request.model if provided, otherwise use provider's assigned default
         model_name = request.model or self.default_model
+        num_ctx = int(os.environ.get("OLLAMA_NUM_CTX") or os.environ.get("MODEL_LOCAL_MAX_TOKENS") or DEFAULT_NUM_CTX)
         body = {
             "model": model_name,
             "messages": [{"role": m.role.value, "content": m.content} for m in request.messages],
             "stream": False,
             "options": {
                 "temperature": request.temperature,
-                "num_ctx": DEFAULT_NUM_CTX,
+                "num_ctx": num_ctx,
                 "num_predict": request.max_tokens,
             },
         }
