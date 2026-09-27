@@ -158,7 +158,7 @@ class GeminiProvider:
             "contents": contents,
             "generationConfig": {
                 "temperature": request.temperature,
-                "maxOutputTokens": request.max_tokens,
+                "maxOutputTokens": min(request.max_tokens or 8192, 8192),
             }
         }
 

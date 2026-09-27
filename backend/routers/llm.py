@@ -124,13 +124,11 @@ async def build_repository_context(db: Session, repo: Repository, analysis_id: O
         context_parts.append("\nKey Components:")
         top_symbols = db.query(FactSymbol).filter(
             FactSymbol.analysis_id == analysis_id,
-            FactSymbol.type.in_(["class", "interface", "function", "enum"])
+            FactSymbol.symbol_type.in_(["class", "interface", "function", "enum"])
         ).limit(15).all()
 
         for sym in top_symbols:
-            context_parts.append(f"- {sym.name} ({sym.type})")
-            if sym.description:
-                context_parts.append(f"  {sym.description}")
+            context_parts.append(f"- {sym.name} ({sym.symbol_type})")
 
         # 5. Sample files/directories
         context_parts.append("\nSample Files:")
@@ -160,6 +158,7 @@ def get_valid_models() -> Dict[str, str]:
     if settings.deployment_type == "PROD":
         return {
             settings.gemini_model: f"Gemini ({settings.gemini_model})",
+            settings.groq_model: f"Groq ({settings.groq_model})",
             settings.openrouter_model: f"OpenRouter ({settings.openrouter_model})",
         }
     else:  # LOCAL or any other mode defaults to local models
@@ -237,6 +236,8 @@ def set_model(
     # For cloud models, check that API keys are configured
     if request.model == settings.gemini_model and not os.environ.get("GEMINI_API_KEY"):
         logger.warning(f"Gemini model '{request.model}' selected but GEMINI_API_KEY not configured")
+    if request.model == settings.groq_model and not os.environ.get("GROQ_API_KEY"):
+        logger.warning(f"Groq model '{request.model}' selected but GROQ_API_KEY not configured")
     if request.model == settings.openrouter_model and not os.environ.get("OPENROUTER_API_KEY"):
         logger.warning(f"OpenRouter model '{request.model}' selected but OPENROUTER_API_KEY not configured")
 
@@ -327,8 +328,8 @@ async def analyze_repository_stream(
             if request.model:
                 os.environ["OLLAMA_MODEL"] = model
 
-            # Cloud models use their actual model names (gemini-2.0-flash, gpt-4-turbo, etc.)
-            model_for_llm = None if model in (settings.gemini_model, settings.openrouter_model) else model
+            # Cloud models use their actual model names (gemini-2.0-flash, qwen/qwen3.8-27b, gpt-4-turbo, etc.)
+            model_for_llm = None if model in (settings.gemini_model, settings.groq_model, settings.openrouter_model) else model
 
             # 4. Initialize structured logging
             structured_log = StructuredLogger(session_id=current_user.id, repository=repo_display_name)
@@ -338,7 +339,31 @@ async def analyze_repository_stream(
             # Route to provider based on model selection - NO FALLBACK FOR EXPLICIT MODEL SELECTION
             from backend.ai.service import LLMService
 
-            if model.startswith("qwen"):
+            if model == settings.gemini_model:
+                # Gemini-only service - NO FALLBACK
+                from backend.ai.providers.gemini import GeminiProvider
+                gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+                gemini_provider = GeminiProvider(api_key=gemini_api_key, model=model)
+                llm_service = LLMService(providers=[gemini_provider])
+                logger.info(f"[router] Using Gemini provider for model {model}")
+
+            elif model == settings.groq_model:
+                # Groq-only service - NO FALLBACK
+                from backend.ai.providers.groq import GroqProvider
+                groq_api_key = os.environ.get("GROQ_API_KEY", "")
+                groq_provider = GroqProvider(api_key=groq_api_key, model=model)
+                llm_service = LLMService(providers=[groq_provider])
+                logger.info(f"[router] Using Groq provider for model {model}")
+
+            elif model == settings.openrouter_model:
+                # OpenRouter-only service - NO FALLBACK
+                from backend.ai.providers.openrouter import OpenRouterProvider
+                openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+                openrouter_provider = OpenRouterProvider(api_key=openrouter_api_key, model=model)
+                llm_service = LLMService(providers=[openrouter_provider])
+                logger.info(f"[router] Using OpenRouter provider for model {model}")
+
+            elif model.startswith("qwen"):
                 # Local Qwen model - Ollama-only service
                 from backend.ai.providers.ollama import OllamaProvider
                 ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
@@ -353,22 +378,6 @@ async def analyze_repository_stream(
                 else:
                     llm_service = LLMService(providers=[primary_provider])
                 logger.info(f"[router] Using Ollama provider for model {model}")
-
-            elif model == settings.gemini_model:
-                # Gemini-only service - NO FALLBACK
-                from backend.ai.providers.gemini import GeminiProvider
-                gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
-                gemini_provider = GeminiProvider(api_key=gemini_api_key, model=model)
-                llm_service = LLMService(providers=[gemini_provider])
-                logger.info(f"[router] Using Gemini provider for model {model}")
-
-            elif model == settings.openrouter_model:
-                # OpenRouter-only service - NO FALLBACK
-                from backend.ai.providers.openrouter import OpenRouterProvider
-                openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
-                openrouter_provider = OpenRouterProvider(api_key=openrouter_api_key, model=model)
-                llm_service = LLMService(providers=[openrouter_provider])
-                logger.info(f"[router] Using OpenRouter provider for model {model}")
 
             else:
                 # Unknown model - use default service chain (should not reach here due to validation)

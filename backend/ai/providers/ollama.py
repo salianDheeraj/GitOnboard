@@ -9,7 +9,7 @@ from typing import Any, Dict, Type, TypeVar
 import httpx
 
 from ..interfaces import LLMProvider
-from ..schemas import LLMRequest, LLMResponse, TokenUsage, NonRetriableError, RetriableError
+from ..schemas import LLMRequest, LLMResponse, TokenUsage, NonRetriableError, RetriableError, ToolCall
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -19,7 +19,7 @@ DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX") or os.environ.get("MODEL_
 
 
 class OllamaProvider:
-    """Calls a local Ollama instance (assumed reachable at base_url)."""
+    """Calls a local or cloud Ollama instance (assumed reachable at base_url)."""
 
     provider_name = "ollama"
 
@@ -32,7 +32,7 @@ class OllamaProvider:
         # Respect request.model if provided, otherwise use provider's assigned default
         model_name = request.model or self.default_model
         num_ctx = int(os.environ.get("OLLAMA_NUM_CTX") or os.environ.get("MODEL_LOCAL_MAX_TOKENS") or DEFAULT_NUM_CTX)
-        body = {
+        body: Dict[str, Any] = {
             "model": model_name,
             "messages": [{"role": m.role.value, "content": m.content} for m in request.messages],
             "stream": False,
@@ -44,6 +44,18 @@ class OllamaProvider:
         }
         if force_json:
             body["format"] = "json"
+        if request.tools:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+                for tool in request.tools
+            ]
         return body
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
@@ -103,6 +115,18 @@ class OllamaProvider:
 
         logger.info(f"[LLM_LIFECYCLE] OllamaProvider: Successfully extracted text ({len(content)} chars, {total_tokens} tokens)")
 
+        tool_calls = None
+        msg_data = data.get("message", {})
+        if msg_data.get("tool_calls"):
+            tool_calls = [
+                ToolCall(
+                    tool_name=tc["function"]["name"],
+                    parameters=tc["function"].get("arguments", {}),
+                    tool_call_id=tc.get("id", f"ollama-{i}"),
+                )
+                for i, tc in enumerate(msg_data["tool_calls"])
+            ]
+
         return LLMResponse(
             content=content,
             model=data.get("model", self.default_model),
@@ -112,6 +136,7 @@ class OllamaProvider:
                 completion_tokens=eval_tokens,
                 total_tokens=total_tokens,
             ),
+            tool_calls=tool_calls,
         )
 
     async def generate_structured(self, request: LLMRequest, schema: Type[T]) -> T:

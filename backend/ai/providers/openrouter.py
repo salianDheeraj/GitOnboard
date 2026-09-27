@@ -30,11 +30,11 @@ class OpenRouterProvider:
     _rate_limit_lock = threading.Lock()
     _request_times: list[float] = []
 
-    def __init__(self, api_key: str, model: Optional[str] = None, timeout: float = 60.0):
+    def __init__(self, api_key: str, model: Optional[str] = None, timeout: float = 120.0):
         import os
         self.api_key = api_key
         self.default_model = model or os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL)
-        self.timeout = timeout
+        self.timeout = float(os.environ.get("OPENROUTER_TIMEOUT", str(timeout)))
 
     async def _enforce_rate_limit(self) -> None:
         """Enforce 15 requests per minute for OpenRouter API.

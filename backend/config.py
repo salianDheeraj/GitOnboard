@@ -84,11 +84,12 @@ class Settings(BaseSettings):
     model_local_quality: str = "qwen2.5-coder:7b"
     model_local_max_tokens: int = 8192
 
-    # PROD mode models (Cloud providers: Gemini, OpenRouter)
-    # Use actual model names (e.g., "gemini-2.0-flash", "gpt-4-turbo")
+    # PROD mode models (Cloud providers: Gemini, OpenRouter, Groq)
+    # Use actual model names (e.g., "gemini-2.0-flash", "gpt-4-turbo", "openai/gpt-oss-120b")
     model_prod_default: str = "gemini-2.0-flash"
     gemini_model: str = "gemini-2.0-flash"
     openrouter_model: str = "gpt-4-turbo"
+    groq_model: str = "openai/gpt-oss-120b"
     model_prod_max_tokens: int = 65536
 
     class Config:
