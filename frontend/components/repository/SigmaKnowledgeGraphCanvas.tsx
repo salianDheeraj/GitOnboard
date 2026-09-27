@@ -44,6 +44,7 @@ export interface SigmaKnowledgeGraphCanvasProps {
   onExpandNode?: (nodeId: string) => void;
   activeRelFilters: Set<string>;
   focusNodeId?: string | null;
+  searchQuery?: string;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -573,9 +574,12 @@ function GraphLayoutAndEventsController({
     startLayout('MANUAL_RELAYOUT');
   }, [rerunTrigger, startLayout]);
 
+  const lastNodeClickTimeRef = useRef<number>(0);
+
   // Handle click & double-click logic when pointer release is below drag threshold
   const handleNodeClick = useCallback((node: string) => {
     const now = Date.now();
+    lastNodeClickTimeRef.current = now;
     const DOUBLE_CLICK_MS = 350;
     if (
       lastClickNodeRef.current === node &&
@@ -611,6 +615,13 @@ function GraphLayoutAndEventsController({
         pointerDownNodeRef.current = e.node;
         pointerDownScreenPosRef.current = { x: e.event.x, y: e.event.y };
         isDraggingRef.current = false;
+      },
+
+      clickNode: (e) => {
+        lastNodeClickTimeRef.current = Date.now();
+        if (!isDraggingRef.current) {
+          handleNodeClick(e.node);
+        }
       },
 
       moveBody: (e) => {
@@ -700,7 +711,7 @@ function GraphLayoutAndEventsController({
           }
           startLayout('POST_DRAG_SETTLING');
         } else {
-          // Normal click — select node without restarting layout
+          // Normal click — select node
           if (node) {
             handleNodeClick(node);
           }
@@ -727,7 +738,9 @@ function GraphLayoutAndEventsController({
       },
 
       clickStage: () => {
-        if (!isDraggingRef.current) {
+        // Only deselect if this was not preceded by a node click within 200ms
+        const timeSinceNodeClick = Date.now() - lastNodeClickTimeRef.current;
+        if (!isDraggingRef.current && timeSinceNodeClick > 250) {
           onDeselectRef.current();
           lastClickNodeRef.current = null;
         }
@@ -782,10 +795,12 @@ function GraphLayoutAndEventsController({
 function VisualReducersController({
   selectedNodeId,
   hoveredNodeId,
+  searchQuery,
   isDark,
 }: {
   selectedNodeId: string | null;
   hoveredNodeId: string | null;
+  searchQuery?: string;
   isDark: boolean;
 }) {
   const sigma = useSigma();
@@ -795,8 +810,87 @@ function VisualReducersController({
     if (!sigma) return;
     const graph = sigma.getGraph();
 
-    // Mode 1: Selected / Clicked Node — ISOLATE & GLOW
-    // When a node is selected (by click or search submit), strictly hide all unrelated nodes,
+    const normalizedQuery = (searchQuery || '').trim().toLowerCase();
+
+    // Mode 1: Search Query Active — SHOW ONLY NODES & THEIR CHILDREN (Connections)
+    // When someone searches that key, show only nodes and its children that contain that keyword
+    if (normalizedQuery) {
+      const matchedSeedIds = new Set<string>();
+      graph.forEachNode((id: string, attr: any) => {
+        const label = (attr.label || '').toLowerCase();
+        const rawNode = attr.rawNode || {};
+        const file = (rawNode.file || '').toLowerCase();
+        const fullName = (rawNode.full_name || '').toLowerCase();
+        const rawType = (attr.rawType || '').toLowerCase();
+
+        if (
+          label.includes(normalizedQuery) ||
+          file.includes(normalizedQuery) ||
+          fullName.includes(normalizedQuery) ||
+          rawType.includes(normalizedQuery) ||
+          id.toLowerCase().includes(normalizedQuery)
+        ) {
+          matchedSeedIds.add(id);
+        }
+      });
+
+      // Collect seed matches + all of their children (out-neighbors and direct connections)
+      const visibleNodeIds = new Set<string>(matchedSeedIds);
+      matchedSeedIds.forEach((seedId) => {
+        if (graph.hasNode(seedId)) {
+          // Add outgoing neighbors (children/dependencies) and neighbors
+          graph.forEachNeighbor(seedId, (neighbor: string) => {
+            visibleNodeIds.add(neighbor);
+          });
+        }
+      });
+
+      const activeEdgeColor = isDark ? '#38bdf8' : '#2563eb';
+
+      setSettings({
+        nodeReducer: (node, data) => {
+          const res: any = { ...data };
+          if (visibleNodeIds.has(node)) {
+            res.hidden = false;
+            if (matchedSeedIds.has(node)) {
+              res.highlighted = true;
+              res.forceLabel = true;
+              res.zIndex = 15;
+            } else {
+              // Direct child / connection of matched node
+              res.highlighted = false;
+              res.zIndex = 5;
+            }
+          } else {
+            // Strictly hide nodes that do not contain keyword or are not its children
+            res.hidden = true;
+            res.label = '';
+            res.zIndex = 0;
+          }
+          return res;
+        },
+        edgeReducer: (edge, data) => {
+          const res: any = { ...data };
+          const ext = graph.extremities(edge);
+          // Show edge only if at least one endpoint is a matched seed, and both are in visible set
+          const connectsSeed = matchedSeedIds.has(ext[0]) || matchedSeedIds.has(ext[1]);
+          if (connectsSeed && visibleNodeIds.has(ext[0]) && visibleNodeIds.has(ext[1])) {
+            res.hidden = false;
+            res.size = 1.8;
+            res.color = activeEdgeColor;
+            res.zIndex = 5;
+          } else {
+            res.hidden = true;
+            res.zIndex = 0;
+          }
+          return res;
+        },
+      });
+      return;
+    }
+
+    // Mode 2: Selected / Clicked Node — ISOLATE & GLOW
+    // When a node is selected (by click), strictly hide all unrelated nodes,
     // show only direct connections, and mark the clicked node with isClickedGlow.
     if (selectedNodeId && graph.hasNode(selectedNodeId)) {
       const neighborSet = new Set(graph.neighbors(selectedNodeId));
@@ -842,7 +936,7 @@ function VisualReducersController({
       return;
     }
 
-    // Mode 2: Hovered Node Only — HIGHLIGHT CONNECTIONS (Do NOT hide others)
+    // Mode 3: Hovered Node Only — HIGHLIGHT CONNECTIONS (Do NOT hide others)
     // On hover, keep the full graph visible: highlight the hovered node & its neighbors,
     // dim unrelated nodes, and highlight incident edges.
     if (hoveredNodeId && graph.hasNode(hoveredNodeId)) {
@@ -888,12 +982,12 @@ function VisualReducersController({
       return;
     }
 
-    // Mode 3: Normal / Idle State — Full Graph
+    // Mode 4: Normal / Idle State — Full Graph
     setSettings({
       nodeReducer: null,
       edgeReducer: null,
     });
-  }, [sigma, setSettings, selectedNodeId, hoveredNodeId, isDark]);
+  }, [sigma, setSettings, selectedNodeId, hoveredNodeId, searchQuery, isDark]);
 
   return null;
 }
@@ -1161,6 +1255,7 @@ export default function SigmaKnowledgeGraphCanvas({
   onExpandNode,
   activeRelFilters,
   focusNodeId,
+  searchQuery,
 }: SigmaKnowledgeGraphCanvasProps) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme !== 'light';
@@ -1275,12 +1370,6 @@ export default function SigmaKnowledgeGraphCanvas({
 
       context.fillStyle = isDark ? '#ffffff' : '#0f172a';
       context.fillText(text, x + paddingX, data.y + size / 3);
-
-      if (data.expandable && !data.expanded) {
-        context.fillStyle = isDark ? '#f97316' : '#ea580c';
-        context.font = `bold ${size}px sans-serif`;
-        context.fillText(' ⊕ double-click to expand', x + boxWidth + 3, data.y + size / 3);
-      }
     },
     [isDark]
   );
@@ -1344,12 +1433,6 @@ export default function SigmaKnowledgeGraphCanvas({
         </div>
       )}
 
-      {/* Legend hint for expandable nodes */}
-      <div className="absolute top-4 right-4 z-10 flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/90 dark:bg-slate-900/90 border border-orange-400/40 text-orange-600 dark:text-orange-400 text-xs font-mono backdrop-blur-md shadow-lg transition-colors">
-        <span className="text-base leading-none">⊕</span>
-        <span>double-click to expand</span>
-      </div>
-
       {graphRef.current && (
       <SigmaContainer
         graph={graphRef.current}
@@ -1377,6 +1460,7 @@ export default function SigmaKnowledgeGraphCanvas({
         <VisualReducersController
           selectedNodeId={selectedNodeId}
           hoveredNodeId={hoveredNodeId}
+          searchQuery={searchQuery}
           isDark={isDark}
         />
         <GraphControlsBar

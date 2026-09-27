@@ -113,10 +113,7 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // ── Progressive exploration mode: always starts with overview ──
-  const [explorationMode, setExplorationMode] = useState<'explore' | 'full'>('explore');
-
-  // Overview-level stats (returned by /overview endpoint)
+  // Overview-level stats (returned by knowledge-graph endpoint)
   const [overviewStats, setOverviewStats] = useState<any>(null);
 
   // The mutable Graphology graph (shared with canvas via ref — never replaced during expansion)
@@ -157,46 +154,14 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
     return () => observer.disconnect();
   }, []);
 
-  // ── 1. Fetch overview (initial progressive load) ──
-  const fetchOverview = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/knowledge-graph/overview`);
-      if (!res.ok) {
-        if (res.status === 404) {
-          throw new Error(`No analyzed knowledge graph found for "${repoName}". Complete repository ingestion first.`);
-        }
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.detail || `HTTP ${res.status}: Failed to fetch knowledge graph overview`);
-      }
-      const data = await res.json();
-      setOverviewStats(data.stats);
-
-      // Build a fresh graph from overview
-      const newGraph = buildInitialGraph(data.nodes || [], data.edges || [], isDark, activeRelFilters);
-      graphRef.current = newGraph;
-      setSigmaKey((k) => k + 1); // full remount: new graph instance
-      setGraphVersion((v) => v + 1);
-      setExpandedNodeIds(new Set());
-    } catch (err: any) {
-      setError(err.message || 'Error loading knowledge graph');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [repoName, isDark, activeRelFilters]);
-
-  // ── 2. Fetch full bulk graph (legacy / advanced mode) ──
-  const fetchFullGraph = useCallback(async (view = currentView, search = searchQuery) => {
+  // ── Fetch full bulk knowledge graph ──
+  const fetchFullGraph = useCallback(async (view = currentView) => {
     setIsLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       params.set('view', view);
       params.set('limit', '500');
-      if (search && search.trim()) {
-        params.set('search', search.trim());
-      }
       const res = await fetch(`/api/repos/${encodeURIComponent(repoName)}/knowledge-graph?${params.toString()}`);
       if (!res.ok) {
         if (res.status === 404) {
@@ -218,16 +183,12 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
     } finally {
       setIsLoading(false);
     }
-  }, [repoName, currentView, searchQuery, isDark, activeRelFilters]);
+  }, [repoName, currentView, isDark, activeRelFilters]);
 
-  // Initial load — always start with overview
+  // Initial load — always load full graph
   useEffect(() => {
     if (repoName) {
-      if (explorationMode === 'explore') {
-        fetchOverview();
-      } else {
-        fetchFullGraph();
-      }
+      fetchFullGraph();
     }
   }, [repoName]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -304,15 +265,13 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
     }
   }, [repoName]);
 
-  // ── 5. View mode switcher (full graph mode only) ──
+  // ── 5. View mode switcher ──
   const handleViewChange = (newView: string) => {
     setCurrentView(newView);
     setSelectedNode(null);
     setNodeDetails(null);
     setFocusNodeId(null);
-    if (explorationMode === 'full') {
-      fetchFullGraph(newView, searchQuery);
-    }
+    fetchFullGraph(newView);
   };
 
   // ── 6. Search ──
@@ -347,8 +306,6 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
     if (matchedId) {
       setFocusNodeId(matchedId);
       handleSelectNode(matchedId);
-    } else if (explorationMode === 'full') {
-      fetchFullGraph(currentView, searchQuery);
     }
   };
 
@@ -360,23 +317,6 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
       else next.add(relType);
       return next;
     });
-  };
-
-  // ── 8. Switch exploration modes ──
-  const switchToExploreMode = () => {
-    setExplorationMode('explore');
-    setSelectedNode(null);
-    setNodeDetails(null);
-    setFocusNodeId(null);
-    fetchOverview();
-  };
-
-  const switchToFullMode = () => {
-    setExplorationMode('full');
-    setSelectedNode(null);
-    setNodeDetails(null);
-    setFocusNodeId(null);
-    fetchFullGraph(currentView, '');
   };
 
   // Derive edge counts from live graph for filter chips
@@ -412,113 +352,76 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
                 <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-500/20 font-mono">
                   {repoName}
                 </span>
-                {explorationMode === 'explore' && (
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-orange-50 dark:bg-orange-500/20 text-orange-700 dark:text-orange-300 border border-orange-300 dark:border-orange-500/30 font-medium flex items-center gap-1">
-                    <FolderOpen className="w-3 h-3" /> Explore Mode
-                  </span>
-                )}
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                {explorationMode === 'explore'
-                  ? 'Progressive exploration — double-click folders to expand'
-                  : 'Layer 4 Fact Store semantic relationships, call hierarchies, and architectural links'}
+                Layer 4 Fact Store semantic relationships, call hierarchies, and architectural links
               </p>
             </div>
           </div>
 
-          {/* Mode switcher + View mode tabs */}
-          <div className="flex items-center gap-2">
-            {/* Explore / Full toggle */}
+          {/* View mode tabs & Search */}
+          <div className="flex items-center gap-3">
+            {/* View filter tabs */}
             <div className="flex items-center bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-1 text-xs">
-              <button
-                onClick={switchToExploreMode}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition-all ${
-                  explorationMode === 'explore'
-                    ? 'bg-orange-500 text-white shadow-sm'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800'
-                }`}
-              >
-                <FolderOpen className="w-3.5 h-3.5" /> Explore
-              </button>
-              <button
-                onClick={switchToFullMode}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition-all ${
-                  explorationMode === 'full'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800'
-                }`}
-              >
-                <Globe className="w-3.5 h-3.5" /> Full Graph
-              </button>
+              {[
+                { id: 'all', label: 'All', icon: Globe },
+                { id: 'calls', label: 'Calls', icon: Zap },
+                { id: 'imports', label: 'Imports', icon: Box },
+                { id: 'routes', label: 'Routes', icon: Route },
+                { id: 'capabilities', label: 'Capabilities', icon: Sparkles },
+                { id: 'structure', label: 'Structure', icon: Layers },
+              ].map((v) => {
+                const Icon = v.icon;
+                const isActive = currentView === v.id;
+                return (
+                  <button
+                    key={v.id}
+                    onClick={() => handleViewChange(v.id)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition-all ${
+                      isActive
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                    {v.label}
+                  </button>
+                );
+              })}
             </div>
 
-            {/* View filter tabs (only in full graph mode) */}
-            {explorationMode === 'full' && (
-              <div className="flex items-center bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-1 text-xs">
-                {[
-                  { id: 'all', label: 'All', icon: Globe },
-                  { id: 'calls', label: 'Calls', icon: Zap },
-                  { id: 'imports', label: 'Imports', icon: Box },
-                  { id: 'routes', label: 'Routes', icon: Route },
-                  { id: 'capabilities', label: 'Capabilities', icon: Sparkles },
-                  { id: 'structure', label: 'Structure', icon: Layers },
-                ].map((v) => {
-                  const Icon = v.icon;
-                  const isActive = currentView === v.id;
-                  return (
-                    <button
-                      key={v.id}
-                      onClick={() => handleViewChange(v.id)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium transition-all ${
-                        isActive
-                          ? 'bg-blue-600 text-white shadow-sm'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800'
-                      }`}
-                    >
-                      <Icon className="w-3.5 h-3.5" />
-                      {v.label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Search & Actions */}
-          <div className="flex items-center gap-2">
-            <form onSubmit={handleSearchSubmit} className="relative">
-              <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setSearchQuery(val);
-                  if (!val.trim()) {
-                    setFocusNodeId(null);
-                    setSelectedNode(null);
-                    setNodeDetails(null);
-                  }
-                }}
-                placeholder="Search symbol or file..."
-                className="pl-8 pr-7 py-1.5 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-500 w-44 md:w-56 transition-colors"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSearchQuery('');
-                    setFocusNodeId(null);
-                    setSelectedNode(null);
-                    setNodeDetails(null);
+            {/* Search Input Bar */}
+            <div className="flex items-center gap-2">
+              <form onSubmit={handleSearchSubmit} className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setSearchQuery(val);
+                    if (!val.trim()) {
+                      setFocusNodeId(null);
+                    }
                   }}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                  title="Clear search"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </form>
+                  placeholder="Search symbol or file..."
+                  className="pl-8 pr-7 py-1.5 text-xs bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-500 w-48 md:w-64 transition-colors"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setFocusNodeId(null);
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                    title="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </form>
+            </div>
           </div>
         </div>
 
@@ -597,7 +500,7 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-50/80 dark:bg-slate-950/80 backdrop-blur-sm gap-3">
               <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
               <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                {explorationMode === 'explore' ? 'Building Overview Graph...' : 'Extracting Fact Store Knowledge Graph...'}
+                Extracting Fact Store Knowledge Graph...
               </p>
             </div>
           )}
@@ -610,7 +513,7 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
               <h2 className="text-base font-semibold text-slate-800 dark:text-slate-200 mb-1">Knowledge Graph Unavailable</h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mb-4">{error}</p>
               <button
-                onClick={() => explorationMode === 'explore' ? fetchOverview() : fetchFullGraph()}
+                onClick={() => fetchFullGraph()}
                 className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
               >
                 Retry
@@ -627,6 +530,7 @@ export default function KnowledgeGraphView({ repoName }: KnowledgeGraphViewProps
             onExpandNode={handleExpandNode}
             activeRelFilters={activeRelFilters}
             focusNodeId={focusNodeId}
+            searchQuery={searchQuery}
           />
         </div>
 
