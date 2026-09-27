@@ -39,7 +39,7 @@ function DashboardContent() {
       const data = await repositoryService.getAll();
       const repoList = Array.isArray(data) ? data : (data?.repositories || []);
       console.log('[Dashboard] Fetched repos:', repoList);
-      repoList.forEach(repo => {
+      repoList.forEach((repo: any) => {
         console.log(`[Dashboard] Repo: ${repo.project_name}, status=${repo.status}, job_status=${repo.job_status}, progress=${repo.progress}`);
       });
       setRepos(repoList);
