@@ -75,11 +75,13 @@ class RepositoryToolLayer:
         path: str,
         start_line: int = 1,
         end_line: Optional[int] = None,
+        context_lines: int = 0,
     ) -> Dict[str, Any]:
         """
         Reads a slice of a file from Azure Blob Storage.
         Requires analysis_id to be set. Constructs blob name from repo hash and path,
         fetches from blob storage, and returns specified line range.
+        Supports optional context_lines to expand surrounding window.
         """
         from backend.storage import get_storage
 
@@ -90,11 +92,12 @@ class RepositoryToolLayer:
         try:
             start_line = int(start_line) if start_line else 1
             end_line = int(end_line) if end_line else None
+            context_lines = max(0, int(context_lines)) if context_lines else 0
         except (ValueError, TypeError):
             return {
                 "path": clean_path,
                 "error": "invalid_range",
-                "message": "start_line and end_line must be valid integers."
+                "message": "start_line, end_line, and context_lines must be valid integers."
             }
 
         # Need analysis_id to get repo hash
@@ -146,51 +149,54 @@ class RepositoryToolLayer:
             lines = resolved_text.splitlines(keepends=True)
             total_lines = len(lines)
 
-            # Context overflow protection:
-            # If the LLM did not specify line boundaries and the file is large,
-            # do not dump the whole file into the context; guide the LLM to use line limits.
-            if end_line is None and total_lines > 150:
-                return {
-                    "path": clean_path,
-                    "total_lines": total_lines,
-                    "error": "context_overflow_protection",
-                    "message": (
-                        f"Refusing full file read: '{clean_path}' has {total_lines} lines. "
-                        f"Reading the entire file without line boundaries will cause context overflow and crash the session. "
-                        f"Please call 'read_file' with specific 'start_line' and 'end_line' (e.g. start_line=1, end_line=100), "
-                        f"or use 'search_code' / 'get_file_outline' to locate the relevant section."
-                    ),
-                    "suggested_action": "Call read_file specifying a line range (max 150 lines)."
-                }
-
             s, e = clamp_line_range(total_lines, start_line, end_line)
+            if context_lines > 0:
+                s = max(1, s - context_lines)
+                e = min(total_lines, e + context_lines)
 
-            # If the requested line range itself is excessively large (e.g. > 250 lines):
-            if (e - s + 1) > 250:
-                return {
-                    "path": clean_path,
-                    "start_line": s,
-                    "end_line": e,
-                    "total_lines": total_lines,
-                    "error": "context_overflow_protection",
-                    "message": (
-                        f"The requested line range ({s}-{e}) spans {e - s + 1} lines, which exceeds "
-                        f"the safe read limit (250 lines) to prevent context overflow. "
-                        f"Please narrow your line range (e.g. start_line={s}, end_line={min(s + 150, e)})."
-                    ),
-                    "suggested_action": f"Call read_file with start_line={s}, end_line={min(s + 150, e)}."
-                }
+            # Token-aware context protection:
+            # Conservative output-token budget for a single read_file observation (~1200 tokens ≈ 4800 chars).
+            # This ensures a single tool observation never consumes a large fraction of the token budget.
+            MAX_READ_OUTPUT_CHARS = 4800
 
-            selected_lines = lines[s - 1 : e]
+            # Calculate safe range line-by-line based on actual character/token estimate
+            accumulated_chars = 0
+            safe_end = s - 1
+            for idx in range(s - 1, e):
+                line_len = len(lines[idx]) + 7  # include line number prefix formatting (e.g. "  12 | ")
+                if accumulated_chars + line_len > MAX_READ_OUTPUT_CHARS and safe_end >= s:
+                    # Exceeds budget and we have at least one line
+                    break
+                accumulated_chars += line_len
+                safe_end = idx + 1
+
+            was_clamped = (safe_end < e)
+            actual_end = safe_end if was_clamped else e
+
+            selected_lines = lines[s - 1 : actual_end]
             numbered_content = "".join(f"{s + idx:4d} | {line}" for idx, line in enumerate(selected_lines))
+
+            if was_clamped:
+                next_start = actual_end + 1
+                notice = (
+                    f"\n\n[CONTEXT PROTECTION]\n"
+                    f"Requested lines: {s}-{e}\n"
+                    f"Returned lines: {s}-{actual_end}\n"
+                    f"Remaining lines: {next_start}-{e}\n"
+                    f"Continue with read_file(path=\"{clean_path}\", start_line={next_start}, end_line={e})."
+                )
+                numbered_content += notice
 
             return {
                 "path": clean_path,
                 "start_line": s,
-                "end_line": e,
+                "end_line": actual_end,
+                "requested_start_line": s,
+                "requested_end_line": e,
                 "total_lines": total_lines,
                 "content": numbered_content,
                 "raw_text": "".join(selected_lines),
+                "is_truncated": was_clamped,
             }
 
         except FileNotFoundError:
@@ -231,6 +237,24 @@ class RepositoryToolLayer:
                         "is_agent_instruction": f.is_agent_instruction,
                         "is_test": f.is_test,
                         "is_binary": f.is_binary,
+                    })
+                    if len(results) >= limit:
+                        break
+        elif self.repo_root and os.path.exists(self.repo_root):
+            root_path = Path(self.repo_root)
+            for file_path in root_path.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                rel_path = file_path.relative_to(root_path).as_posix()
+                if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(file_path.name, pattern):
+                    results.append({
+                        "path": rel_path,
+                        "language": "python" if rel_path.endswith(".py") else "text",
+                        "size": file_path.stat().st_size,
+                        "is_documentation": False,
+                        "is_agent_instruction": False,
+                        "is_test": False,
+                        "is_binary": False,
                     })
                     if len(results) >= limit:
                         break
@@ -411,15 +435,43 @@ class RepositoryToolLayer:
         logger.error(f"[search_code:DIAGNOSTIC] ENTRY query='{query[:50]}' repo='{self.repo_name}' db={self.db is not None} analysis_id={self.analysis_id}")
 
         # Validate preconditions
-        if self.db is None:
+        if self.db is None or self.analysis_id is None:
+            if self.repo_root and os.path.exists(self.repo_root):
+                root_path = Path(self.repo_root)
+                try:
+                    pattern = re.compile(query, re.IGNORECASE)
+                except re.error:
+                    pattern = re.compile(re.escape(query), re.IGNORECASE)
+
+                scanned = 0
+                for file_path in root_path.rglob("*"):
+                    if not file_path.is_file():
+                        continue
+                    if file_pattern and not fnmatch.fnmatch(file_path.name, file_pattern):
+                        continue
+                    rel_path = file_path.relative_to(root_path).as_posix()
+                    scanned += 1
+                    try:
+                        content = file_path.read_text(encoding="utf-8", errors="replace")
+                        for idx, line in enumerate(content.splitlines(), start=1):
+                            if pattern.search(line):
+                                results.append({
+                                    "path": rel_path,
+                                    "file": rel_path,
+                                    "line": idx,
+                                    "snippet": line.strip()[:200],
+                                    "query": query,
+                                })
+                                if len(results) >= max_matches:
+                                    return results
+                    except Exception:
+                        pass
+                    if scanned >= max_files_scanned:
+                        break
+                return results
+
             try:
-                logger.error(f"[search_code:FAILURE] Database session is None. Cannot search repository '{self.repo_name}'.")
-            except:
-                pass
-            return results
-        if self.analysis_id is None:
-            try:
-                logger.error(f"[search_code:FAILURE] Analysis ID is None for repository '{self.repo_name}'. Analysis may not be complete.")
+                logger.error(f"[search_code:FAILURE] Database session is None or Analysis ID is None. Cannot search repository '{self.repo_name}'.")
             except:
                 pass
             return results

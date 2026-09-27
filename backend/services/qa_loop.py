@@ -139,6 +139,10 @@ class QALoop:
         self.protocol_adapter = QAProtocolAdapter(model_id=model)
         self.consecutive_malformed_count = 0  # Track malformed responses to terminate early
 
+    def _parse_response(self, response_text: str) -> Dict[str, Any]:
+        """Backward compatibility helper delegating to protocol_adapter."""
+        return self.protocol_adapter.parse_response(response_text)
+
     async def run(self, question: str) -> QALoopResult:
         """
         Run the agentic loop: question → LLM → tool dispatch → repeat until done.
@@ -195,7 +199,11 @@ class QALoop:
                 result.turns.append(turn)
                 if self.on_turn:
                     await self.on_turn(turn)
-                result.answer = turn.raw_model_output
+                parsed_final = self.protocol_adapter.parse_response(turn.raw_model_output)
+                answer_text = parsed_final.get("answer", turn.raw_model_output)
+                answer = strip_xml_tags(answer_text)
+                answer = extract_json_answer(answer)
+                result.answer = answer
                 break
 
             # 2. Call LLM with current conversation
@@ -203,12 +211,16 @@ class QALoop:
             turn_start = time.perf_counter()
 
             try:
-                # CONTEXT WINDOWING: Keep only recent turns to prevent token explosion
-                # Keep last N turns (each turn = 1-2 messages) to maintain context while avoiding token limit
-                window_size = 6  # Keep last 6 messages (~3 turns of tool-call + tool-response pairs)
-                windowed_messages = messages[-window_size:] if len(messages) > window_size else messages
-                if len(messages) > window_size:
-                    logger.debug(f"[QALoop] Context windowing: keeping last {len(windowed_messages)} of {len(messages)} messages")
+                # CONTEXT WINDOWING: Always preserve initial user query (messages[0])
+                # and keep the last N-1 messages for recent tool context to prevent token explosion
+                window_size = 8  # Keep user query + up to 7 recent tool turns
+                if len(messages) > window_size and len(messages) > 1:
+                    user_query_msg = messages[0]
+                    recent_messages = messages[-(window_size - 1):]
+                    windowed_messages = [user_query_msg] + recent_messages
+                    logger.debug(f"[QALoop] Context windowing: preserved user query + last {len(recent_messages)} of {len(messages)} messages")
+                else:
+                    windowed_messages = messages
 
                 # Build LLMRequest with system prompt as first message
                 llm_messages = [
@@ -646,19 +658,48 @@ class QALoop:
         turn_start = time.perf_counter()
 
         try:
-            # Build LLMRequest with system prompt as first message
+            # Build dedicated synthesis system prompt (do not send the tool-calling prompt!)
+            final_system_prompt = (
+                "You are an expert repository analysis assistant. "
+                "The exploration phase is complete. Based strictly on the conversation history "
+                "and tool observations above, provide a comprehensive, clear, and well-structured Markdown "
+                "answer to the user's initial question. Do NOT attempt to call any tools or output tool syntax. "
+                "Provide only your final answer in Markdown directly."
+            )
             llm_messages = [
-                Message(role=MessageRole.SYSTEM, content=self.system_prompt_parts.full_text),
+                Message(role=MessageRole.SYSTEM, content=final_system_prompt),
             ]
-            for msg in messages:
+
+            # Context windowing: keep initial query and recent turns to prevent token explosion on rate-limited providers
+            window_size = 10
+            msgs_to_include = messages
+            if len(messages) > window_size and len(messages) > 1:
+                msgs_to_include = [messages[0]] + messages[-(window_size - 1):]
+
+            for msg in msgs_to_include:
                 try:
                     role_str = msg.get("role", "user").lower() if isinstance(msg, dict) else "user"
                     role = MessageRole(role_str) if role_str in ["system", "user", "assistant", "tool"] else MessageRole.USER
                     content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+                    # If content is a tool observation, truncate if excessively long (>3000 chars)
+                    if role == MessageRole.TOOL or "[read_file]" in content or "[search" in content:
+                        if len(content) > 3000:
+                            content = content[:3000] + "\n...[truncated for synthesis]..."
                     llm_messages.append(Message(role=role, content=content))
                 except Exception as msg_err:
                     logger.error(f"[QALoop] Error processing message in final answer turn: {msg_err}")
                     raise
+
+            # Add explicit instruction for final synthesis
+            llm_messages.append(
+                Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "Please provide your complete, final answer in Markdown now based on all the findings "
+                        "and evidence gathered above. Do not call any tools."
+                    ),
+                )
+            )
 
             request = LLMRequest(
                 messages=llm_messages,
@@ -667,6 +708,28 @@ class QALoop:
                 max_tokens=settings.llm_max_tokens,
             )
             llm_response = await self.llm_service.generate(request)
+
+            raw_output = (llm_response.content or "").strip()
+            # If model returned no content or returned only tool calls in final turn, synthesize fallback from observations
+            if not raw_output:
+                logger.warning("[QALoop] Final turn returned empty text content; synthesizing summary from observations")
+                obs_snippets = []
+                for m in reversed(messages):
+                    content = m.get("content", "") if isinstance(m, dict) else ""
+                    if any(k in content for k in ["[read_file]", "[search", "routes", "export", "class ", "def "]):
+                        lines = [line for line in content.splitlines() if line.strip() and not line.startswith("[")]
+                        if lines:
+                            obs_snippets.append("\n".join(lines[:12]))
+                    if len(obs_snippets) >= 3:
+                        break
+                if obs_snippets:
+                    raw_output = (
+                        "### Key Repository Findings\n\n"
+                        + "\n\n---\n\n".join(reversed(obs_snippets))
+                    )
+                else:
+                    raw_output = "The repository analysis finished. Please review the collected evidence in the session."
+
         except Exception as e:
             logger.error(f"[QALoop] Final answer LLM call failed: {e}", exc_info=True)
             return QALoopTurn(
@@ -681,9 +744,9 @@ class QALoop:
 
         return QALoopTurn(
             turn_index=turn_index,
-            raw_model_output=llm_response.content,
-            prompt_tokens=llm_response.usage.prompt_tokens,
-            completion_tokens=llm_response.usage.completion_tokens,
+            raw_model_output=raw_output,
+            prompt_tokens=llm_response.usage.prompt_tokens if llm_response.usage else 0,
+            completion_tokens=llm_response.usage.completion_tokens if llm_response.usage else 0,
             provider=llm_response.provider,
             model=llm_response.model,
             duration_ms=(time.perf_counter() - turn_start) * 1000,
@@ -954,44 +1017,43 @@ class QALoop:
             content = data.get('content', '')
             raw_text = data.get('raw_text', '')
 
-            # Use actual content if available, otherwise try formatted content
-            actual_content = raw_text or content
+            # Use formatted content (which contains line numbers and context protection notice) if available,
+            # otherwise fall back to raw_text
+            actual_content = content or raw_text
 
             # If end_line is missing, use total_lines
             if end_line is None:
                 end_line = total_lines or start_line
 
             summary = f"[read_file] {path} lines {start_line}-{end_line}: {len(actual_content)} chars (total: {total_lines})\n"
-            # Include actual file content so LLM can reason over code
             if actual_content:
-                # Cap individual file results at 25 KB to prevent context window overflow
-                # Evidence: Turn 8 file exceeded capacity; accumulated files hit 89.6 KB on turn 9
-                MAX_FILE_CONTENT_PER_RESULT = 25 * 1024  # 25 KB
-                if len(actual_content) > MAX_FILE_CONTENT_PER_RESULT:
-                    truncated_content = actual_content[:MAX_FILE_CONTENT_PER_RESULT]
-                    truncation_notice = (
-                        f"\n\n[TRUNCATED: File content exceeded {MAX_FILE_CONTENT_PER_RESULT // 1024} KB limit for LLM context. "
-                        f"Original: {len(actual_content)} chars. To read more:\n"
-                        f"  • Use read_file with a smaller line range (e.g., start_line=100, end_line=200)\n"
-                        f"  • Use search_repository to find specific functions/classes\n"
-                        f"  • Use get_symbol to inspect specific definitions]\n"
-                    )
-                    return summary + truncated_content + truncation_notice
                 return summary + actual_content
             return summary
         elif tool_name == "query_rim" and isinstance(data, dict):
             if not data.get("found"):
-                return f"[query_rim] Entity not found: {data.get('message', '')}"
+                resolution = data.get("resolution", "")
+                msg = data.get("message", "")
+                fallback = data.get("fallback")
+                fb_str = f" Suggested next step: call {fallback['tool']}(query='{fallback['query']}')" if fallback else ""
+                if resolution == "NO_STATIC_EDGE_FOUND":
+                    return f"[query_rim] No static edge found: {msg}.{fb_str}"
+                return f"[query_rim] Entity not found: {msg}.{fb_str}"
+
             related = data.get("related", [])
-            summary = f"[query_rim] Found {len(related)} related entities:\n"
-            # Include actual entity details so LLM understands relationships
+            target_info = ""
+            if "target" in data and isinstance(data["target"], dict):
+                t = data["target"]
+                target_info = f" for '{t.get('name', '')}' ({t.get('type', '')} at {t.get('location', '')}:{t.get('line', '')})"
+
+            summary = f"[query_rim] Found {len(related)} related entities{target_info}:\n"
             for entity in related:
                 name = entity.get("name", "?")
                 entity_type = entity.get("entity_type", "?")
                 location = entity.get("location", "?")
                 line_num = entity.get("line_number", "?")
                 role = entity.get("relationship_role", "?")
-                summary += f"  - {name} ({entity_type}, {location}:{line_num}, role: {role})\n"
+                path_str = f", path: {' -> '.join(entity['path'])}" if entity.get("path") else ""
+                summary += f"  - {name} ({entity_type}, {location}:{line_num}, role: {role}{path_str})\n"
             return summary
         elif tool_name == "search_repository" and isinstance(data, list):
             summary = f"[search_repository] Found {len(data)} results:\n"
