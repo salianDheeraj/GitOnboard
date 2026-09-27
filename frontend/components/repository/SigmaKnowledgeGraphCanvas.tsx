@@ -1,0 +1,1197 @@
+"use client";
+
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { MultiDirectedGraph } from 'graphology';
+import forceAtlas2, { ForceAtlas2Settings } from 'graphology-layout-forceatlas2';
+import {
+  SigmaContainer,
+  useSigma,
+  useRegisterEvents,
+  useCamera,
+  useSetSettings,
+} from '@react-sigma/core';
+import '@react-sigma/core/lib/style.css';
+import { useTheme } from '@/components/theme-provider';
+import {
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  RotateCcw,
+  Sparkles,
+} from 'lucide-react';
+
+import {
+  NODE_TYPE_COLORS,
+  EDGE_COLORS_DARK,
+  EDGE_COLORS_LIGHT,
+} from './graphModel';
+
+export { buildInitialGraph, injectExpansionData } from './graphModel';
+
+// ──────────────────────────────────────────────────────────────────────────
+// PROPS INTERFACE
+// ──────────────────────────────────────────────────────────────────────────
+
+export interface SigmaKnowledgeGraphCanvasProps {
+  /** The stable mutable Graphology graph instance to render */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  graphRef: React.MutableRefObject<any>;
+  /** Called whenever the graph has been mutated and sigma should re-render */
+  graphVersion: number;
+  selectedNodeId: string | null;
+  onSelectNode: (nodeId: string | null) => void;
+  onExpandNode?: (nodeId: string) => void;
+  activeRelFilters: Set<string>;
+  focusNodeId?: string | null;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// INTERNAL CONTROLLERS
+// ──────────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────────────────────────────────
+// LAYOUT LIFECYCLE & STABILITY CONSTANTS
+// ──────────────────────────────────────────────────────────────────────────
+
+type LayoutMode =
+  | 'IDLE'
+  | 'INITIAL_SETTLING'
+  | 'EXPANSION_SETTLING'
+  | 'MANUAL_RELAYOUT'
+  | 'DRAGGING'
+  | 'POST_DRAG_SETTLING';
+
+export type LayoutStopReason =
+  | 'STOP_REASON_STABLE'
+  | 'STOP_REASON_SAFETY_LIMIT'
+  | 'STOP_REASON_CANCELLED'
+  | 'STOP_REASON_UNMOUNTED';
+
+// ==========================================
+// ForceAtlas2 stability & termination thresholds
+// ==========================================
+// Movement-based stability requires BOTH average displacement across all non-fixed nodes
+// AND maximum displacement of any individual non-fixed node to remain below thresholds
+// for REQUIRED_CONSECUTIVE_STABLE_CHECKS consecutive frames.
+export const STABLE_AVG_THRESHOLD = 0.015;            // Maximum average displacement across all non-fixed nodes
+export const STABLE_MAX_THRESHOLD = 0.06;              // Maximum displacement of any single non-fixed node
+export const REQUIRED_CONSECUTIVE_STABLE_CHECKS = 10; // Consecutive frames both thresholds must be met
+export const MAX_SAFETY_CAP_FRAMES = 2500;            // Emergency safety fallback limit to prevent infinite loops; NEVER normal termination
+const DRAG_THRESHOLD_PX = 5;                           // Screen pixels of movement required to enter drag mode
+
+// ==========================================
+// ForceAtlas2 tuning parameters
+// Manually adjust these values when tuning
+// ==========================================
+const FA2_LIN_LOG_MODE = true;
+const FA2_OUTBOUND_ATTRACTION_DISTRIBUTION = false;
+const FA2_SCALING_RATIO = 10.0;
+const FA2_GRAVITY = 0.08;
+const FA2_EDGE_WEIGHT_INFLUENCE = 1.0;
+const FA2_MIN_SCREEN_GAP_PX = 10;
+
+/**
+ * Execute ForceAtlas2 iterations and measure node displacement for stability detection.
+ */
+function runFA2Step(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  g: any,
+  iterations: number,
+  slowdown: number,
+  measureStability: boolean,
+  extraRadiusPadding: number = 0
+): { avgDisplacement: number; maxDisplacement: number } {
+  // Capture previous positions of non-fixed nodes
+  const prevPositions = new Map<string, { x: number; y: number }>();
+  if (measureStability) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    g.forEachNode((id: string, attr: any) => {
+      if (!attr.fixed) {
+        prevPositions.set(id, { x: attr.x, y: attr.y });
+      }
+    });
+  }
+
+  // Temporarily apply camera-calibrated collision padding strictly for ForceAtlas2 calculation
+  const originalSizes = new Map<string, number>();
+  if (extraRadiusPadding > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    g.forEachNode((id: string, attr: any) => {
+      const s = attr.size || 1;
+      originalSizes.set(id, s);
+      g.setNodeAttribute(id, 'size', s + extraRadiusPadding);
+    });
+  }
+
+  forceAtlas2.assign(g, {
+    iterations,
+    settings: {
+      linLogMode: FA2_LIN_LOG_MODE,
+      outboundAttractionDistribution: FA2_OUTBOUND_ATTRACTION_DISTRIBUTION,
+      adjustSizes: true,
+      edgeWeightInfluence: FA2_EDGE_WEIGHT_INFLUENCE,
+      scalingRatio: FA2_SCALING_RATIO,
+      gravity: FA2_GRAVITY,
+      strongGravityMode: false,
+      slowDown: slowdown,
+      barnesHutOptimize: g.order > 150,
+      barnesHutTheta: 0.5,
+    },
+  });
+
+  // Immediately restore original node sizes so Sigma WebGL rendering and visual size remain 100% unchanged
+  if (extraRadiusPadding > 0) {
+    originalSizes.forEach((s, id) => {
+      g.setNodeAttribute(id, 'size', s);
+    });
+  }
+
+  if (!measureStability) {
+    return { avgDisplacement: 0, maxDisplacement: 0 };
+  }
+
+  let totalDisplacement = 0;
+  let maxDisplacement = 0;
+  let measuredCount = 0;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  g.forEachNode((id: string, attr: any) => {
+    if (!attr.fixed && prevPositions.has(id)) {
+      const prev = prevPositions.get(id)!;
+      const dx = attr.x - prev.x;
+      const dy = attr.y - prev.y;
+      const dist = Math.hypot(dx, dy);
+      totalDisplacement += dist;
+      if (dist > maxDisplacement) {
+        maxDisplacement = dist;
+      }
+      measuredCount++;
+    }
+  });
+
+  const avgDisplacement = measuredCount > 0 ? totalDisplacement / measuredCount : 0;
+  return { avgDisplacement, maxDisplacement };
+}
+
+/**
+ * Helper to calculate graph-space distance corresponding to a screen-space pixel displacement
+ * at the DEFAULT CAMERA VIEW using Sigma v3's viewportToGraph with explicit cameraState override.
+ *
+ * This performs calibration against Sigma's default camera state (center {0.5, 0.5}, ratio 1, angle 0)
+ * without moving the user's active camera or creating a second coordinate system.
+ */
+function getGraphDistanceForScreenPixels(sigma: any, desiredGapPx: number): number {
+  if (!sigma || typeof sigma.viewportToGraph !== 'function' || desiredGapPx <= 0) {
+    return 0;
+  }
+  try {
+    const defaultCameraState = { x: 0.5, y: 0.5, ratio: 1.0, angle: 0 };
+    const pA = sigma.viewportToGraph({ x: 0, y: 0 }, { cameraState: defaultCameraState });
+    const pB = sigma.viewportToGraph({ x: desiredGapPx, y: 0 }, { cameraState: defaultCameraState });
+    return Math.hypot(pB.x - pA.x, pB.y - pA.y);
+  } catch (err) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('[Sigma FA2 Calibration] Failed to convert screen pixels to graph distance:', err);
+    }
+    return 0;
+  }
+}
+
+/**
+ * Unified Layout and Interaction Controller.
+ * Manages ForceAtlas2 layout states (initial settling, expansion relaxation, manual re-layout)
+ * and interactive node dragging (with node pinned as fixed: true and FA2 actively responding).
+ */
+function GraphLayoutAndEventsController({
+  graphRef,
+  graphVersion,
+  onSelectNode,
+  onDeselect,
+  setHoveredNode,
+  onExpandNode,
+  focusNodeId,
+  rerunTrigger,
+  setIsSettling,
+  isDraggingRef,
+  onLayoutFinished,
+}: {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  graphRef: React.MutableRefObject<any>;
+  graphVersion: number;
+  onSelectNode: (nodeId: string) => void;
+  onDeselect: () => void;
+  setHoveredNode: (nodeId: string | null) => void;
+  onExpandNode?: (nodeId: string) => void;
+  focusNodeId?: string | null;
+  rerunTrigger: number;
+  setIsSettling: (s: boolean) => void;
+  isDraggingRef: React.MutableRefObject<boolean>;
+  onLayoutFinished?: () => void;
+}) {
+  const sigma = useSigma();
+  const registerEvents = useRegisterEvents();
+  const { reset, gotoNode } = useCamera();
+
+  // Stable references for props to prevent re-triggering effects and accidental loop cancellation
+  const onSelectNodeRef = useRef(onSelectNode);
+  const onDeselectRef = useRef(onDeselect);
+  const onExpandNodeRef = useRef(onExpandNode);
+  const setHoveredNodeRef = useRef(setHoveredNode);
+  const setIsSettlingRef = useRef(setIsSettling);
+  const onLayoutFinishedRef = useRef(onLayoutFinished);
+
+  useEffect(() => {
+    onSelectNodeRef.current = onSelectNode;
+    onDeselectRef.current = onDeselect;
+    onExpandNodeRef.current = onExpandNode;
+    setHoveredNodeRef.current = setHoveredNode;
+    setIsSettlingRef.current = setIsSettling;
+    onLayoutFinishedRef.current = onLayoutFinished;
+  });
+
+  // Layout lifecycle state refs
+  const animFrameRef = useRef<number | null>(null);
+  const modeRef = useRef<LayoutMode>('IDLE');
+  const frameRef = useRef<number>(0);
+  const stableCountRef = useRef<number>(0);
+  const isFirstLoad = useRef<boolean>(true);
+  const lastStopReasonRef = useRef<LayoutStopReason | null>(null);
+
+  // Drag tracking refs
+  const pointerDownNodeRef = useRef<string | null>(null);
+  const pointerDownScreenPosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastClickTimeRef = useRef<number>(0);
+  const lastClickNodeRef = useRef<string | null>(null);
+
+  // Focus camera on searched/selected node without restarting layout
+  useEffect(() => {
+    if (!focusNodeId || !sigma) return;
+    const g = sigma.getGraph();
+    if (g && g.hasNode(focusNodeId)) {
+      gotoNode(focusNodeId, { duration: 500 });
+    }
+  }, [focusNodeId, sigma, gotoNode]);
+
+  // Main ForceAtlas2 layout step engine
+  const startLayout = useCallback((newMode: LayoutMode) => {
+    if (!sigma) return;
+    const graph = sigma.getGraph();
+    if (!graph || graph.order === 0) return;
+
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+      if (modeRef.current !== 'IDLE') {
+        lastStopReasonRef.current = 'STOP_REASON_CANCELLED';
+        if (typeof window !== 'undefined') {
+          (window as any).__FA2_LAST_STOP_REASON = 'STOP_REASON_CANCELLED';
+        }
+      }
+    }
+
+    modeRef.current = newMode;
+    frameRef.current = 0;
+    stableCountRef.current = 0;
+
+    // Determine graph-coordinate scale corresponding to the DEFAULT Sigma camera view.
+    // Convert FA2_MIN_SCREEN_GAP_PX into Graphology coordinate units once for this layout run.
+    const minGapGraphUnits = getGraphDistanceForScreenPixels(sigma, FA2_MIN_SCREEN_GAP_PX);
+    // In ForceAtlas2 (adjustSizes: true), collision distance = dist - (r1 + r2).
+    // Adding half the desired gap to each node's collision radius ensures a minimum
+    // separation of (r1 + extra) + (r2 + extra) = r1 + r2 + minGapGraphUnits.
+    const extraRadiusPadding = minGapGraphUnits / 2;
+
+    if (
+      newMode === 'INITIAL_SETTLING' ||
+      newMode === 'EXPANSION_SETTLING' ||
+      newMode === 'MANUAL_RELAYOUT' ||
+      newMode === 'POST_DRAG_SETTLING'
+    ) {
+      setIsSettlingRef.current(true);
+    }
+
+    const finishSettling = (
+      reason: LayoutStopReason,
+      frame: number,
+      avgDisplacement: number,
+      maxDisplacement: number
+    ) => {
+      lastStopReasonRef.current = reason;
+      if (typeof window !== 'undefined') {
+        (window as any).__FA2_LAST_STOP_REASON = reason;
+        (window as any).__FA2_LAST_STOP_STATS = {
+          iteration: frame,
+          averageDisplacement: avgDisplacement,
+          maximumDisplacement: maxDisplacement,
+          consecutiveStableChecks: stableCountRef.current,
+          stopReason: reason,
+          mode: modeRef.current,
+        };
+        if ((window as any).__FA2_DEBUG) {
+          (window as any).__FA2_DEBUG.stopReason = reason;
+        }
+      }
+      if (process.env.NODE_ENV !== 'production') {
+        if (reason === 'STOP_REASON_STABLE') {
+          console.debug(
+            `[ForceAtlas2] Layout converged cleanly (${reason}) at frame ${frame} (${modeRef.current}): avg=${avgDisplacement.toFixed(4)}, max=${maxDisplacement.toFixed(4)}`
+          );
+        } else if (reason === 'STOP_REASON_SAFETY_LIMIT') {
+          console.warn(
+            `[ForceAtlas2] Layout emergency safety limit reached (${reason}) at frame ${frame} (${modeRef.current}): avg=${avgDisplacement.toFixed(4)}, max=${maxDisplacement.toFixed(4)}`
+          );
+        }
+      }
+
+      const wasInitial = modeRef.current === 'INITIAL_SETTLING';
+      modeRef.current = 'IDLE';
+      setIsSettlingRef.current(false);
+      onLayoutFinishedRef.current?.();
+      animFrameRef.current = null;
+      sigma.refresh();
+
+      if (wasInitial && isFirstLoad.current) {
+        isFirstLoad.current = false;
+        reset({ duration: 400 });
+      }
+    };
+
+    const step = () => {
+      const g = sigma.getGraph();
+      if (!g || g.order === 0) {
+        modeRef.current = 'IDLE';
+        setIsSettlingRef.current(false);
+        animFrameRef.current = null;
+        return;
+      }
+
+      const currentMode = modeRef.current;
+      if (currentMode === 'IDLE') {
+        setIsSettlingRef.current(false);
+        animFrameRef.current = null;
+        return;
+      }
+
+      frameRef.current++;
+      const frame = frameRef.current;
+
+      // ── DRAGGING (runs 12 iterations/frame with low slowdown for fast, instantaneous elastic spring tracking) ──
+      if (currentMode === 'DRAGGING') {
+        runFA2Step(g, 12, 0.3, false, extraRadiusPadding);
+        sigma.refresh();
+        animFrameRef.current = requestAnimationFrame(step);
+        return;
+      }
+
+      // ── SETTLING MODES (INITIAL_SETTLING, EXPANSION_SETTLING, MANUAL_RELAYOUT, POST_DRAG_SETTLING) ──
+      // All modes share the exact same movement-based stability detection and emergency safety cap rule.
+      if (
+        currentMode === 'INITIAL_SETTLING' ||
+        currentMode === 'EXPANSION_SETTLING' ||
+        currentMode === 'MANUAL_RELAYOUT' ||
+        currentMode === 'POST_DRAG_SETTLING'
+      ) {
+        if (currentMode === 'EXPANSION_SETTLING' && frame === 1) {
+          // Unpin any existing nodes and clean expansion marker so all nodes participate in layout
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          g.forEachNode((id: string, attr: any) => {
+            if (attr.isNewExpansion) {
+              g.removeNodeAttribute(id, 'isNewExpansion');
+            }
+            if (attr.fixed && id !== pointerDownNodeRef.current) {
+              g.setNodeAttribute(id, 'fixed', false);
+            }
+          });
+        }
+
+        // Run ForceAtlas2 step and measure non-fixed node displacement in Graphology coordinates
+        const { avgDisplacement, maxDisplacement } = runFA2Step(g, 2, 2.5, true, extraRadiusPadding);
+
+        // Movement-based stability check: BOTH average and maximum displacement must be below threshold
+        const isStableThisFrame =
+          avgDisplacement < STABLE_AVG_THRESHOLD &&
+          maxDisplacement < STABLE_MAX_THRESHOLD;
+
+        if (isStableThisFrame) {
+          stableCountRef.current++;
+        } else {
+          stableCountRef.current = 0;
+        }
+
+        // Expose debug telemetry on window for inspection during settling
+        if (typeof window !== 'undefined') {
+          (window as any).__FA2_DEBUG = {
+            iteration: frame,
+            averageDisplacement: avgDisplacement,
+            maximumDisplacement: maxDisplacement,
+            consecutiveStableChecks: stableCountRef.current,
+            currentMode,
+            stopReason: null,
+          };
+        }
+
+        // Periodic development logging
+        if (process.env.NODE_ENV !== 'production' && (frame % 50 === 0 || isStableThisFrame)) {
+          console.debug(
+            `[ForceAtlas2 Settling] frame=${frame} (${currentMode}): avgD=${avgDisplacement.toFixed(4)}, maxD=${maxDisplacement.toFixed(4)}, stableChecks=${stableCountRef.current}/${REQUIRED_CONSECUTIVE_STABLE_CHECKS}`
+          );
+        }
+
+        // Path A: Normal Termination via consecutive movement-based stability checks
+        if (stableCountRef.current >= REQUIRED_CONSECUTIVE_STABLE_CHECKS) {
+          finishSettling('STOP_REASON_STABLE', frame, avgDisplacement, maxDisplacement);
+          return;
+        }
+
+        // Path B: Emergency Safety Cap (fallback ONLY to prevent infinite simulations)
+        if (frame >= MAX_SAFETY_CAP_FRAMES) {
+          finishSettling('STOP_REASON_SAFETY_LIMIT', frame, avgDisplacement, maxDisplacement);
+          return;
+        }
+
+        // Active layout continues: refresh WebGL view and request next frame
+        sigma.refresh();
+        animFrameRef.current = requestAnimationFrame(step);
+        return;
+      }
+    };
+
+    animFrameRef.current = requestAnimationFrame(step);
+  }, [sigma, reset]);
+
+  // Layout RAF cleanup on unmount ONLY — React rerenders must NEVER cancel layout loop
+  useEffect(() => {
+    return () => {
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+        lastStopReasonRef.current = 'STOP_REASON_UNMOUNTED';
+        if (typeof window !== 'undefined') {
+          (window as any).__FA2_LAST_STOP_REASON = 'STOP_REASON_UNMOUNTED';
+        }
+      }
+    };
+  }, []);
+
+  // Handle graphVersion changes (initial load or expansion)
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph || graph.order === 0) return;
+
+    let hasNew = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graph.forEachNode((_: string, attr: any) => {
+      if (attr.isNewExpansion) hasNew = true;
+    });
+
+    if (hasNew) {
+      startLayout('EXPANSION_SETTLING');
+    } else {
+      startLayout('INITIAL_SETTLING');
+    }
+  }, [graphVersion, graphRef, startLayout]);
+
+  // Handle manual re-layout trigger
+  useEffect(() => {
+    if (rerunTrigger === 0) return;
+    startLayout('MANUAL_RELAYOUT');
+  }, [rerunTrigger, startLayout]);
+
+  // Handle click & double-click logic when pointer release is below drag threshold
+  const handleNodeClick = useCallback((node: string) => {
+    const now = Date.now();
+    const DOUBLE_CLICK_MS = 350;
+    if (
+      lastClickNodeRef.current === node &&
+      now - lastClickTimeRef.current < DOUBLE_CLICK_MS
+    ) {
+      // Double click: expand node if expandable
+      const graph = sigma.getGraph();
+      if (graph && graph.hasNode(node)) {
+        const expandable = graph.getNodeAttribute(node, 'expandable');
+        if (expandable) {
+          onExpandNodeRef.current?.(node);
+        }
+      }
+      lastClickNodeRef.current = null;
+      lastClickTimeRef.current = 0;
+    } else {
+      // Single click: select node
+      lastClickTimeRef.current = now;
+      lastClickNodeRef.current = node;
+      onSelectNodeRef.current(node);
+    }
+  }, [sigma]);
+
+  // Register Sigma pointer and stage events
+  useEffect(() => {
+    if (!sigma) return;
+
+    registerEvents({
+      downNode: (e) => {
+        const graph = sigma.getGraph();
+        if (!graph.hasNode(e.node)) return;
+
+        pointerDownNodeRef.current = e.node;
+        pointerDownScreenPosRef.current = { x: e.event.x, y: e.event.y };
+        isDraggingRef.current = false;
+      },
+
+      moveBody: (e) => {
+        const node = pointerDownNodeRef.current;
+        if (!node) return;
+
+        if (!isDraggingRef.current) {
+          const startPos = pointerDownScreenPosRef.current;
+          if (!startPos) return;
+          const dist = Math.hypot(e.event.x - startPos.x, e.event.y - startPos.y);
+          if (dist < DRAG_THRESHOLD_PX) {
+            return; // Below threshold: still a potential click
+          }
+
+          // Crossed threshold: enter DRAGGING
+          isDraggingRef.current = true;
+          const graph = sigma.getGraph();
+          if (graph.hasNode(node)) {
+            graph.setNodeAttribute(node, 'fixed', true);
+          }
+          sigma.getCamera().disable();
+          startLayout('DRAGGING');
+        }
+
+        // Dragging in progress: track cursor in graph space
+        const currentPos = sigma.viewportToGraph(e.event);
+        const graph = sigma.getGraph();
+        if (graph.hasNode(node)) {
+          graph.setNodeAttribute(node, 'x', currentPos.x);
+          graph.setNodeAttribute(node, 'y', currentPos.y);
+        }
+
+        e.preventSigmaDefault();
+      },
+
+      upNode: () => {
+        const node = pointerDownNodeRef.current;
+        const wasDragging = isDraggingRef.current;
+
+        pointerDownNodeRef.current = null;
+        pointerDownScreenPosRef.current = null;
+        isDraggingRef.current = false;
+
+        if (wasDragging) {
+          sigma.getCamera().enable();
+          const graph = sigma.getGraph();
+          if (node && graph.hasNode(node)) {
+            graph.setNodeAttribute(node, 'fixed', false);
+          }
+          startLayout('POST_DRAG_SETTLING');
+        } else {
+          // Normal click — select node without restarting layout
+          if (node) {
+            handleNodeClick(node);
+          }
+        }
+      },
+
+      upStage: () => {
+        const node = pointerDownNodeRef.current;
+        const wasDragging = isDraggingRef.current;
+
+        pointerDownNodeRef.current = null;
+        pointerDownScreenPosRef.current = null;
+        isDraggingRef.current = false;
+
+        if (wasDragging) {
+          sigma.getCamera().enable();
+          const graph = sigma.getGraph();
+          if (node && graph.hasNode(node)) {
+            graph.setNodeAttribute(node, 'fixed', false);
+          }
+          startLayout('POST_DRAG_SETTLING');
+        }
+      },
+
+      clickStage: () => {
+        if (!isDraggingRef.current) {
+          onDeselectRef.current();
+          lastClickNodeRef.current = null;
+        }
+      },
+
+      enterNode: (e) => {
+        setHoveredNodeRef.current(e.node);
+      },
+
+      leaveNode: () => {
+        setHoveredNodeRef.current(null);
+      },
+    });
+
+    // Safety fallback: if pointer is released outside canvas
+    const handleGlobalRelease = () => {
+      if (isDraggingRef.current) {
+        const node = pointerDownNodeRef.current;
+        pointerDownNodeRef.current = null;
+        pointerDownScreenPosRef.current = null;
+        isDraggingRef.current = false;
+
+        sigma.getCamera().enable();
+        const graph = sigma.getGraph();
+        if (node && graph.hasNode(node)) {
+          graph.setNodeAttribute(node, 'fixed', false);
+        }
+        startLayout('POST_DRAG_SETTLING');
+      } else {
+        pointerDownNodeRef.current = null;
+        pointerDownScreenPosRef.current = null;
+      }
+    };
+
+    window.addEventListener('pointerup', handleGlobalRelease);
+    window.addEventListener('mouseup', handleGlobalRelease);
+
+    return () => {
+      window.removeEventListener('pointerup', handleGlobalRelease);
+      window.removeEventListener('mouseup', handleGlobalRelease);
+    };
+  }, [registerEvents, sigma, startLayout, handleNodeClick]);
+
+  return null;
+}
+
+/**
+ * Handles WebGL-level property overrides for hover, selection, and neighbor highlighting.
+ */
+function VisualReducersController({
+  selectedNodeId,
+  hoveredNodeId,
+  isDark,
+}: {
+  selectedNodeId: string | null;
+  hoveredNodeId: string | null;
+  isDark: boolean;
+}) {
+  const sigma = useSigma();
+  const setSettings = useSetSettings();
+  const activeFocusNode = selectedNodeId || hoveredNodeId;
+
+  useEffect(() => {
+    if (!sigma) return;
+    const graph = sigma.getGraph();
+
+    if (!activeFocusNode || !graph.hasNode(activeFocusNode)) {
+      setSettings({
+        nodeReducer: null,
+        edgeReducer: null,
+      });
+      return;
+    }
+
+    const neighborSet = new Set(graph.neighbors(activeFocusNode));
+    const activeEdgeColor = isDark ? '#38bdf8' : '#2563eb';
+    const dimmedNodeColor = isDark ? '#1e293b' : '#e2e8f0';
+
+    setSettings({
+      nodeReducer: (node, data) => {
+        const res: any = { ...data };
+        if (node === activeFocusNode) {
+          res.highlighted = true;
+          res.size = Math.min(24, (data.size || 8) * 1.35);
+          res.forceLabel = true;
+          res.zIndex = 10;
+        } else if (neighborSet.has(node)) {
+          res.highlighted = true;
+          res.forceLabel = true;
+          res.zIndex = 5;
+        } else {
+          res.label = '';
+          res.color = dimmedNodeColor;
+          res.zIndex = 0;
+        }
+        return res;
+      },
+      edgeReducer: (edge, data) => {
+        const res: any = { ...data };
+        const ext = graph.extremities(edge);
+        const isConnected = ext[0] === activeFocusNode || ext[1] === activeFocusNode;
+        if (isConnected) {
+          res.size = 2.0;
+          res.color = activeEdgeColor;
+          res.zIndex = 10;
+        } else {
+          res.hidden = true;
+          res.zIndex = 0;
+        }
+        return res;
+      },
+    });
+  }, [sigma, setSettings, activeFocusNode, isDark]);
+
+  return null;
+}
+
+
+
+// ==========================================
+// Dynamic Screen-Space Node Overlap Correction
+// ==========================================
+export const CAMERA_INACTIVITY_DEBOUNCE_MS = 3000;
+export const COLLISION_GAP_PX = 2;
+export const MAX_COLLISION_PASSES = 5;
+
+/**
+ * Controller that dynamically detects and resolves circle-circle node overlaps
+ * in viewport/screen coordinates when the Sigma camera has been idle for 3 seconds.
+ * Corrected positions are converted back to Graphology graph space without restarting ForceAtlas2.
+ */
+function NodeOverlapCorrectionController({
+  isSettling,
+  isDraggingRef,
+  layoutVersion,
+}: {
+  isSettling: boolean;
+  isDraggingRef: React.MutableRefObject<boolean>;
+  layoutVersion: number;
+}) {
+  const sigma = useSigma();
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const runCorrection = useCallback(() => {
+    if (!sigma) return;
+    const graph = sigma.getGraph();
+    if (!graph || graph.order === 0) return;
+
+    // Do not run while layout is settling or while a node is actively being dragged
+    if (isSettling || isDraggingRef.current) return;
+
+    interface NodeScreenData {
+      id: string;
+      screenX: number;
+      screenY: number;
+      radius: number;
+    }
+
+    const nodesData: NodeScreenData[] = [];
+
+    // 1. Convert current Graphology positions to viewport coordinates and get rendered screen radius
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    graph.forEachNode((id: string, attr: any) => {
+      if (attr.hidden) return;
+      const screenPos = sigma.graphToViewport({ x: attr.x, y: attr.y });
+      const radius = sigma.scaleSize(attr.size || 1);
+      nodesData.push({
+        id,
+        screenX: screenPos.x,
+        screenY: screenPos.y,
+        radius,
+      });
+    });
+
+    const count = nodesData.length;
+    if (count <= 1) return;
+
+    let anyDisplaced = false;
+
+    // 2. Perform bounded iterative pairwise collision resolution in screen space
+    for (let pass = 0; pass < MAX_COLLISION_PASSES; pass++) {
+      let passCollisions = 0;
+
+      for (let i = 0; i < count; i++) {
+        const nodeA = nodesData[i];
+        for (let j = i + 1; j < count; j++) {
+          const nodeB = nodesData[j];
+
+          const dx = nodeB.screenX - nodeA.screenX;
+          const dy = nodeB.screenY - nodeA.screenY;
+          const dist = Math.hypot(dx, dy);
+          const requiredDist = nodeA.radius + nodeB.radius + COLLISION_GAP_PX;
+
+          if (dist < requiredDist) {
+            passCollisions++;
+            anyDisplaced = true;
+
+            const overlap = requiredDist - dist;
+            let nx = 0;
+            let ny = 0;
+
+            if (dist > 1e-4) {
+              nx = dx / dist;
+              ny = dy / dist;
+            } else {
+              // Centers are coincident: separate in arbitrary deterministic direction
+              const angle = ((i * 31 + j * 17) % 360) * (Math.PI / 180);
+              nx = Math.cos(angle);
+              ny = Math.sin(angle);
+            }
+
+            // Distribute displacement inversely proportional to radii (or proportional to the other node's size)
+            const sumRadii = nodeA.radius + nodeB.radius;
+            const weightA = sumRadii > 0 ? nodeB.radius / sumRadii : 0.5;
+            const weightB = sumRadii > 0 ? nodeA.radius / sumRadii : 0.5;
+
+            nodeA.screenX -= nx * overlap * weightA;
+            nodeA.screenY -= ny * overlap * weightA;
+            nodeB.screenX += nx * overlap * weightB;
+            nodeB.screenY += ny * overlap * weightB;
+          }
+        }
+      }
+
+      // Early exit if no overlaps detected in this pass
+      if (passCollisions === 0) {
+        break;
+      }
+    }
+
+    // 3. If any nodes were adjusted, convert corrected screen positions back to graph space
+    if (anyDisplaced) {
+      for (let i = 0; i < count; i++) {
+        const node = nodesData[i];
+        const graphPos = sigma.viewportToGraph({ x: node.screenX, y: node.screenY });
+        graph.setNodeAttribute(node.id, 'x', graphPos.x);
+        graph.setNodeAttribute(node.id, 'y', graphPos.y);
+      }
+      sigma.refresh();
+    }
+  }, [sigma, isSettling, isDraggingRef]);
+
+  // Stable ref for isSettling to avoid dropping camera events or tearing down timers on state transitions
+  const isSettlingRef = useRef(isSettling);
+  useEffect(() => {
+    isSettlingRef.current = isSettling;
+  }, [isSettling]);
+
+  // Listen to camera 'updated' event and debounce 3 seconds of camera inactivity
+  useEffect(() => {
+    if (!sigma) return;
+    const camera = sigma.getCamera();
+
+    const handleCameraUpdate = () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+
+      // If actively dragging or settling, do not schedule overlap correction
+      if (isDraggingRef.current || isSettlingRef.current) {
+        return;
+      }
+
+      timerRef.current = setTimeout(() => {
+        runCorrection();
+        timerRef.current = null;
+      }, CAMERA_INACTIVITY_DEBOUNCE_MS);
+    };
+
+    camera.on('updated', handleCameraUpdate);
+
+    return () => {
+      camera.removeListener('updated', handleCameraUpdate);
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [sigma, isDraggingRef, runCorrection]);
+
+  // Trigger overlap correction after every graph layout change / settling completion
+  useEffect(() => {
+    if (isSettling || isDraggingRef.current) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      return;
+    }
+
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+
+    timerRef.current = setTimeout(() => {
+      runCorrection();
+      timerRef.current = null;
+    }, CAMERA_INACTIVITY_DEBOUNCE_MS);
+
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [isSettling, layoutVersion, isDraggingRef, runCorrection]);
+
+  return null;
+}
+
+/**
+ * Floating canvas toolbar.
+ */
+function GraphControlsBar({
+  isSettling,
+  onRerunLayout,
+}: {
+  isSettling: boolean;
+  onRerunLayout: () => void;
+}) {
+  const { zoomIn, zoomOut, reset } = useCamera();
+  return (
+    <div className="absolute bottom-5 left-5 z-10 flex items-center gap-1.5 p-1.5 rounded-xl bg-white/90 dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 backdrop-blur-md shadow-xl transition-colors">
+      <button
+        onClick={() => zoomIn({ duration: 200, factor: 1.5 })}
+        className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+        title="Zoom In"
+      >
+        <ZoomIn className="w-4 h-4" />
+      </button>
+
+      <button
+        onClick={() => zoomOut({ duration: 200, factor: 1.5 })}
+        className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+        title="Zoom Out"
+      >
+        <ZoomOut className="w-4 h-4" />
+      </button>
+
+      <button
+        onClick={() => reset({ duration: 300 })}
+        className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+        title="Reset Camera View"
+      >
+        <Maximize2 className="w-4 h-4" />
+      </button>
+
+      <div className="w-[1px] h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
+
+      <button
+        onClick={onRerunLayout}
+        disabled={isSettling}
+        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+          isSettling
+            ? 'bg-blue-600/20 text-blue-600 dark:text-blue-300 cursor-not-allowed border border-blue-400/30'
+            : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white border border-slate-200 dark:border-slate-700'
+        }`}
+        title="Recalculate ForceAtlas2 Layout"
+      >
+        <RotateCcw className={`w-3.5 h-3.5 ${isSettling ? 'animate-spin text-blue-500' : ''}`} />
+        <span>{isSettling ? 'Settling...' : 'Re-layout'}</span>
+      </button>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// MAIN SIGMA CANVAS COMPONENT
+// ──────────────────────────────────────────────────────────────────────────
+
+export default function SigmaKnowledgeGraphCanvas({
+  graphRef,
+  graphVersion,
+  selectedNodeId,
+  onSelectNode,
+  onExpandNode,
+  activeRelFilters,
+  focusNodeId,
+}: SigmaKnowledgeGraphCanvasProps) {
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme !== 'light';
+  const bgColor = isDark ? '#020617' : '#f8fafc';
+
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [isSettling, setIsSettling] = useState(false);
+  const [rerunTrigger, setRerunTrigger] = useState(0);
+  const [layoutVersion, setLayoutVersion] = useState(0);
+  const isDraggingRef = useRef<boolean>(false);
+
+
+
+  // Custom node label drawing with high-contrast pill background
+  const drawNodeLabel = useCallback(
+    (context: CanvasRenderingContext2D, data: any, settings: any) => {
+      if (!data.label) return;
+      const size = settings.labelSize || 12;
+      const font = settings.labelFont || 'sans-serif';
+      const weight = settings.labelWeight || '600';
+      context.font = `${weight} ${size}px ${font}`;
+
+      const text = String(data.label);
+      const textWidth = context.measureText(text).width;
+      const paddingX = 5;
+      const paddingY = 2;
+      const boxHeight = size + paddingY * 2;
+      const boxWidth = textWidth + paddingX * 2;
+      const x = data.x + data.size + 4;
+      const y = data.y - boxHeight / 2;
+
+      // Draw contrast pill
+      context.fillStyle = isDark ? 'rgba(15, 23, 42, 0.88)' : 'rgba(255, 255, 255, 0.92)';
+      context.strokeStyle = isDark ? 'rgba(51, 65, 85, 0.7)' : 'rgba(203, 213, 225, 0.9)';
+      context.lineWidth = 1;
+      context.beginPath();
+      if (typeof (context as any).roundRect === 'function') {
+        (context as any).roundRect(x, y, boxWidth, boxHeight, 4);
+      } else {
+        context.rect(x, y, boxWidth, boxHeight);
+      }
+      context.fill();
+      context.stroke();
+
+      context.fillStyle = isDark ? '#f8fafc' : '#0f172a';
+      context.fillText(text, x + paddingX, data.y + size / 3);
+
+      // Draw expand indicator on expandable nodes that haven't been expanded
+      if (data.expandable && !data.expanded) {
+        context.fillStyle = isDark ? '#f97316' : '#ea580c';
+        context.font = `bold ${size - 2}px sans-serif`;
+        context.fillText('⊕', x + boxWidth + 3, data.y + size / 3);
+      }
+    },
+    [isDark]
+  );
+
+  // Custom node hover drawing
+  const drawNodeHover = useCallback(
+    (context: CanvasRenderingContext2D, data: any, settings: any) => {
+      if (!data.label) return;
+      const size = (settings.labelSize || 12) + 1;
+      const font = settings.labelFont || 'sans-serif';
+      context.font = `700 ${size}px ${font}`;
+
+      const text = String(data.label);
+      const textWidth = context.measureText(text).width;
+      const paddingX = 6;
+      const paddingY = 3;
+      const boxHeight = size + paddingY * 2;
+      const boxWidth = textWidth + paddingX * 2;
+      const x = data.x + data.size + 5;
+      const y = data.y - boxHeight / 2;
+
+      context.fillStyle = isDark ? 'rgba(30, 41, 59, 0.96)' : 'rgba(255, 255, 255, 0.98)';
+      context.strokeStyle = data.expandable
+        ? isDark ? '#f97316' : '#ea580c'
+        : isDark ? '#38bdf8' : '#2563eb';
+      context.lineWidth = 1.5;
+      context.beginPath();
+      if (typeof (context as any).roundRect === 'function') {
+        (context as any).roundRect(x, y, boxWidth, boxHeight, 5);
+      } else {
+        context.rect(x, y, boxWidth, boxHeight);
+      }
+      context.fill();
+      context.stroke();
+
+      context.fillStyle = isDark ? '#ffffff' : '#0f172a';
+      context.fillText(text, x + paddingX, data.y + size / 3);
+
+      if (data.expandable && !data.expanded) {
+        context.fillStyle = isDark ? '#f97316' : '#ea580c';
+        context.font = `bold ${size}px sans-serif`;
+        context.fillText(' ⊕ double-click to expand', x + boxWidth + 3, data.y + size / 3);
+      }
+    },
+    [isDark]
+  );
+
+  // Sigma settings
+  const sigmaSettings = useMemo(
+    () => ({
+      renderLabels: true,
+      renderEdgeLabels: false,
+      labelRenderedSizeThreshold: 6,
+      labelDensity: 0.8,
+      labelGridCellSize: 80,
+      labelFont: 'JetBrains Mono, Inter, system-ui, sans-serif',
+      labelSize: 12,
+      labelWeight: '600',
+      labelColor: { color: isDark ? '#f8fafc' : '#0f172a' },
+      defaultDrawNodeLabel: drawNodeLabel,
+      defaultDrawNodeHover: drawNodeHover,
+      defaultNodeType: 'circle',
+      defaultEdgeType: 'arrow',
+      minEdgeThickness: 1.0,
+      hideEdgesOnMove: true,
+      hideLabelsOnMove: false,
+      enableCameraZooming: true,
+      enableCameraPanning: true,
+      enableCameraRotation: false,
+      zIndex: true,
+      stagePadding: 50,
+      autoRescale: true,
+    }),
+    [isDark, drawNodeLabel, drawNodeHover]
+  );
+
+  const handleDeselect = useCallback(() => onSelectNode(null), [onSelectNode]);
+
+  return (
+    <div
+      className="relative w-full h-full overflow-hidden transition-colors duration-200"
+      style={
+        {
+          backgroundColor: bgColor,
+          '--sigma-background-color': bgColor,
+        } as React.CSSProperties
+      }
+    >
+      <style>{`
+        .react-sigma,
+        .sigma-container {
+          background-color: ${bgColor} !important;
+        }
+        .sigma-container canvas {
+          background-color: transparent !important;
+        }
+      `}</style>
+
+      {isSettling && (
+        <div className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/90 dark:bg-slate-900/90 border border-blue-400/40 text-blue-600 dark:text-blue-400 text-xs font-mono backdrop-blur-md shadow-lg animate-pulse transition-colors">
+          <Sparkles className="w-3.5 h-3.5 text-blue-500 animate-spin" />
+          <span>ForceAtlas2 settling graph layout...</span>
+        </div>
+      )}
+
+      {/* Legend hint for expandable nodes */}
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/90 dark:bg-slate-900/90 border border-orange-400/40 text-orange-600 dark:text-orange-400 text-xs font-mono backdrop-blur-md shadow-lg transition-colors">
+        <span className="text-base leading-none">⊕</span>
+        <span>double-click to expand</span>
+      </div>
+
+      {graphRef.current && (
+      <SigmaContainer
+        graph={graphRef.current}
+        settings={sigmaSettings}
+        className="w-full h-full"
+      >
+        <GraphLayoutAndEventsController
+          graphRef={graphRef}
+          graphVersion={graphVersion}
+          onSelectNode={onSelectNode}
+          onDeselect={handleDeselect}
+          setHoveredNode={setHoveredNodeId}
+          onExpandNode={onExpandNode}
+          focusNodeId={focusNodeId}
+          rerunTrigger={rerunTrigger}
+          setIsSettling={setIsSettling}
+          isDraggingRef={isDraggingRef}
+          onLayoutFinished={() => setLayoutVersion((v) => v + 1)}
+        />
+        <NodeOverlapCorrectionController
+          isSettling={isSettling}
+          isDraggingRef={isDraggingRef}
+          layoutVersion={layoutVersion}
+        />
+        <VisualReducersController
+          selectedNodeId={selectedNodeId}
+          hoveredNodeId={hoveredNodeId}
+          isDark={isDark}
+        />
+        <GraphControlsBar
+          isSettling={isSettling}
+          onRerunLayout={() => setRerunTrigger((prev) => prev + 1)}
+        />
+      </SigmaContainer>
+      )}
+    </div>
+  );
+}
+
