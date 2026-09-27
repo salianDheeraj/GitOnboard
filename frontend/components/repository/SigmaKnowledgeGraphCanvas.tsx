@@ -790,61 +790,110 @@ function VisualReducersController({
 }) {
   const sigma = useSigma();
   const setSettings = useSetSettings();
-  const activeFocusNode = selectedNodeId || hoveredNodeId;
 
   useEffect(() => {
     if (!sigma) return;
     const graph = sigma.getGraph();
 
-    if (!activeFocusNode || !graph.hasNode(activeFocusNode)) {
+    // Mode 1: Selected / Clicked Node — ISOLATE & GLOW
+    // When a node is selected (by click or search submit), strictly hide all unrelated nodes,
+    // show only direct connections, and mark the clicked node with isClickedGlow.
+    if (selectedNodeId && graph.hasNode(selectedNodeId)) {
+      const neighborSet = new Set(graph.neighbors(selectedNodeId));
+      const activeEdgeColor = isDark ? '#38bdf8' : '#2563eb';
+
       setSettings({
-        nodeReducer: null,
-        edgeReducer: null,
+        nodeReducer: (node, data) => {
+          const res: any = { ...data };
+          if (node === selectedNodeId) {
+            res.highlighted = true;
+            res.isClickedGlow = true;
+            res.size = Math.min(28, (data.size || 8) * 1.45);
+            res.forceLabel = true;
+            res.zIndex = 20;
+          } else if (neighborSet.has(node)) {
+            res.highlighted = true;
+            res.forceLabel = true;
+            res.zIndex = 10;
+          } else {
+            // Strictly hide all non-connected nodes on click
+            res.hidden = true;
+            res.label = '';
+            res.zIndex = 0;
+          }
+          return res;
+        },
+        edgeReducer: (edge, data) => {
+          const res: any = { ...data };
+          const ext = graph.extremities(edge);
+          const isConnected = ext[0] === selectedNodeId || ext[1] === selectedNodeId;
+          if (isConnected) {
+            res.size = 2.2;
+            res.color = activeEdgeColor;
+            res.zIndex = 10;
+          } else {
+            // Hide all non-connected edges on click
+            res.hidden = true;
+            res.zIndex = 0;
+          }
+          return res;
+        },
       });
       return;
     }
 
-    const neighborSet = new Set(graph.neighbors(activeFocusNode));
-    const activeEdgeColor = isDark ? '#38bdf8' : '#2563eb';
-    const dimmedNodeColor = isDark ? '#1e293b' : '#e2e8f0';
+    // Mode 2: Hovered Node Only — HIGHLIGHT CONNECTIONS (Do NOT hide others)
+    // On hover, keep the full graph visible: highlight the hovered node & its neighbors,
+    // dim unrelated nodes, and highlight incident edges.
+    if (hoveredNodeId && graph.hasNode(hoveredNodeId)) {
+      const neighborSet = new Set(graph.neighbors(hoveredNodeId));
+      const activeEdgeColor = isDark ? '#38bdf8' : '#2563eb';
+      const dimmedNodeColor = isDark ? '#1e293b' : '#e2e8f0';
 
+      setSettings({
+        nodeReducer: (node, data) => {
+          const res: any = { ...data };
+          if (node === hoveredNodeId) {
+            res.highlighted = true;
+            res.size = Math.min(24, (data.size || 8) * 1.3);
+            res.forceLabel = true;
+            res.zIndex = 15;
+          } else if (neighborSet.has(node)) {
+            res.highlighted = true;
+            res.forceLabel = true;
+            res.zIndex = 8;
+          } else {
+            // Dimmed but NOT hidden on hover
+            res.label = '';
+            res.color = dimmedNodeColor;
+            res.zIndex = 0;
+          }
+          return res;
+        },
+        edgeReducer: (edge, data) => {
+          const res: any = { ...data };
+          const ext = graph.extremities(edge);
+          const isConnected = ext[0] === hoveredNodeId || ext[1] === hoveredNodeId;
+          if (isConnected) {
+            res.size = 2.0;
+            res.color = activeEdgeColor;
+            res.zIndex = 10;
+          } else {
+            res.hidden = true;
+            res.zIndex = 0;
+          }
+          return res;
+        },
+      });
+      return;
+    }
+
+    // Mode 3: Normal / Idle State — Full Graph
     setSettings({
-      nodeReducer: (node, data) => {
-        const res: any = { ...data };
-        if (node === activeFocusNode) {
-          res.highlighted = true;
-          res.size = Math.min(26, (data.size || 8) * 1.4);
-          res.forceLabel = true;
-          res.zIndex = 10;
-        } else if (neighborSet.has(node)) {
-          res.highlighted = true;
-          res.forceLabel = true;
-          res.zIndex = 5;
-        } else {
-          // Strictly hide all unrelated nodes so only the focus node and its connections are visible
-          res.hidden = true;
-          res.label = '';
-          res.zIndex = 0;
-        }
-        return res;
-      },
-      edgeReducer: (edge, data) => {
-        const res: any = { ...data };
-        const ext = graph.extremities(edge);
-        const isConnected = ext[0] === activeFocusNode || ext[1] === activeFocusNode;
-        if (isConnected) {
-          res.size = 2.2;
-          res.color = activeEdgeColor;
-          res.zIndex = 10;
-        } else {
-          // Hide all non-connected edges
-          res.hidden = true;
-          res.zIndex = 0;
-        }
-        return res;
-      },
+      nodeReducer: null,
+      edgeReducer: null,
     });
-  }, [sigma, setSettings, activeFocusNode, isDark]);
+  }, [sigma, setSettings, selectedNodeId, hoveredNodeId, isDark]);
 
   return null;
 }
@@ -1143,10 +1192,34 @@ export default function SigmaKnowledgeGraphCanvas({
       const x = data.x + data.size + 4;
       const y = data.y - boxHeight / 2;
 
+      // ── GLOW AURA FOR CLICKED / SELECTED NODE ──
+      if (data.isClickedGlow) {
+        context.save();
+        // Outer ambient glow ring
+        context.beginPath();
+        context.arc(data.x, data.y, data.size + 10, 0, Math.PI * 2);
+        context.fillStyle = isDark ? 'rgba(56, 189, 248, 0.22)' : 'rgba(37, 99, 235, 0.20)';
+        context.fill();
+
+        // Inner luminous pulse ring
+        context.beginPath();
+        context.arc(data.x, data.y, data.size + 5, 0, Math.PI * 2);
+        context.fillStyle = isDark ? 'rgba(56, 189, 248, 0.40)' : 'rgba(37, 99, 235, 0.35)';
+        context.strokeStyle = isDark ? '#38bdf8' : '#2563eb';
+        context.lineWidth = 2.5;
+        context.shadowColor = isDark ? '#38bdf8' : '#2563eb';
+        context.shadowBlur = 14;
+        context.stroke();
+        context.fill();
+        context.restore();
+      }
+
       // Draw contrast pill
       context.fillStyle = isDark ? 'rgba(15, 23, 42, 0.88)' : 'rgba(255, 255, 255, 0.92)';
-      context.strokeStyle = isDark ? 'rgba(51, 65, 85, 0.7)' : 'rgba(203, 213, 225, 0.9)';
-      context.lineWidth = 1;
+      context.strokeStyle = data.isClickedGlow
+        ? (isDark ? '#38bdf8' : '#2563eb')
+        : (isDark ? 'rgba(51, 65, 85, 0.7)' : 'rgba(203, 213, 225, 0.9)');
+      context.lineWidth = data.isClickedGlow ? 1.8 : 1;
       context.beginPath();
       if (typeof (context as any).roundRect === 'function') {
         (context as any).roundRect(x, y, boxWidth, boxHeight, 4);
