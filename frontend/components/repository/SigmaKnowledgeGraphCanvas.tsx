@@ -85,8 +85,8 @@ const DRAG_THRESHOLD_PX = 5;                           // Screen pixels of movem
 // ==========================================
 // Applies temporary restorative spring force to directly connected neighbors during node dragging.
 // High-weight structural edges receive stronger spring pull; weak dependencies receive gentle pull.
-export const DRAG_SPRING_STIFFNESS = 0.35;             // Spring constant k: fraction of stretch restored per frame
-export const DRAG_SPRING_MAX_DISPLACEMENT = 25.0;      // Hard displacement cap (graph units) per frame to ensure stability
+export const DRAG_SPRING_STIFFNESS = 0.70;             // Spring constant k: fraction of stretch restored per frame
+export const DRAG_SPRING_MAX_DISPLACEMENT = 120.0;     // Hard displacement cap (graph units) per frame
 export const DRAG_SPRING_MIN_EXTENSION = 0.0;          // Deadzone before spring engages (0 = engages on any stretch)
 
 export interface DragSpringNeighbor {
