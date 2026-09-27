@@ -28,6 +28,7 @@ class SemanticQueryClass(str, Enum):
 class TraversalDirection(str, Enum):
     FORWARD = "FORWARD"
     REVERSE = "REVERSE"
+    BOTH = "BOTH"
 
 
 @dataclass

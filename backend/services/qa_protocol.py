@@ -35,84 +35,95 @@ class SystemPromptParts:
 class QAProtocolAdapter:
     """Builds and parses the action protocol for Q&A (JSON by default, Hermes XML for Qwen3)."""
 
-    def __init__(self, model_id: Optional[str] = None):
+    @staticmethod
+    def is_cloud_model(model_id: str, provider: Optional[str] = None) -> bool:
+        """Return True if model/provider is a cloud model using native tool calling."""
+        import os
+        from backend.config import settings
+
+        if provider in ("groq", "gemini", "openrouter", "ollama_cloud"):
+            return True
+
+        if model_id:
+            groq_m = getattr(settings, "groq_model", "openai/gpt-oss-120b")
+            gemini_m = getattr(settings, "gemini_model", "gemini-2.0-flash")
+            openrouter_m = getattr(settings, "openrouter_model", "gpt-4-turbo")
+            if model_id in (groq_m, gemini_m, openrouter_m):
+                return True
+
+            model_lower = model_id.lower()
+            if any(marker in model_lower for marker in ("groq", "gemini", "openrouter", "gpt-", "claude")):
+                return True
+            if "ollama_cloud" in model_lower or os.environ.get("OLLAMA_IS_CLOUD", "").lower() in ("true", "1"):
+                return True
+
+        if getattr(settings, "deployment_type", "").upper() == "PROD":
+            return True
+
+        return False
+
+    def __init__(
+        self,
+        model_id: Optional[str] = None,
+        provider: Optional[str] = None,
+        native_tools: Optional[bool] = None,
+    ):
         """
-        Initialize protocol adapter with optional model ID.
+        Initialize protocol adapter.
 
         Args:
-            model_id: Model identifier (e.g., "qwen3:4b-instruct"). If model starts with "qwen",
-                      enables optimizations for Qwen's native tool calling capabilities.
+            model_id: Model identifier (e.g., "qwen/qwen3.8-27b", "gemini-2.0-flash", "qwen3:4b-instruct").
+            provider: Provider name (e.g. "groq", "gemini", "openrouter", "ollama").
+            native_tools: If specified, explicitly enables/disables native tool calling.
         """
         self.model_id = model_id or ""
-        self.is_qwen = self.model_id.lower().startswith("qwen")
+        self.provider = provider
+        if native_tools is not None:
+            self.is_native = native_tools
+        else:
+            self.is_native = self.is_cloud_model(self.model_id, self.provider)
+
+        # Local Ollama models: Hermes XML for local Qwen, JSON for others
+        self.is_local_ollama = not self.is_native
+        self.is_qwen = self.is_local_ollama and ("qwen" in self.model_id.lower())
+
 
     # Tool usage strategies indexed by tool name
     # These are extracted from the original REPOSITORY_ANALYSIS_RULES and keyed by tool name
     # so that build_system_prompt() can generate a dynamic TOOL USAGE STRATEGY section
     # containing only descriptions for the tools that are actually available
     TOOL_USAGE_STRATEGIES = {
-        "get_tree": """**get_tree**: Use to understand repository structure and discover top-level modules.
-  - Prefer when you don't know where relevant code is located
-  - Use when exploring unfamiliar paths (e.g., backend/intelligence, backend/agent)""",
+        "get_tree": """**get_tree**: Use for high-level repository orientation, folder hierarchy, and discovering top-level modules.
+  - Prefer when you need to locate unfamiliar architectural boundaries or folder layouts.
+  - Helps identify which directories to target before detailed search.""",
 
-        "search_code": """**search_code**: Use to find text patterns, keywords, strings, imports, decorators, route fragments.
-  - Use when you know a meaningful text fragment (class name, function name, decorator, config key)
-  - Restrict with path_pattern when useful (e.g., "*.py", "backend/routers")
-  - Examples: "@app.get", "route(", "JWT", "blob_client\"""",
+        "search_repository": """**search_repository**: Primary tool for finding symbols, definitions, references, and files across the repository.
+  - Use for general repository discovery and locating where functions, classes, or concepts live.
+  - Supports comma-separated multi-query batching (e.g., 'login,auth,token') and offset pagination.""",
 
-        "search_symbols": """**search_symbols**: Use to discover symbols by name or glob pattern.
-  - Prefer when the question mentions a class, function, or method
-  - Use when exact symbol or location is uncertain
-  - Examples: "RepositoryToolLayer", "handle_*", "*ToolDefinition\"""",
+        "search_code": """**search_code**: Use for exact lexical text matching, regex patterns, configuration files, and non-symbol code.
+  - Use when looking for exact strings, regex patterns, Dockerfiles, YAML/JSON configs, or specific file extensions.
+  - Restrict with file_pattern when useful (e.g., "*.json", "Dockerfile*").""",
 
-        "get_symbol": """**get_symbol**: Use when you know the symbol name and need definition/location info.
-  - Prefer for questions about specific functions, classes, or methods
-  - Use to identify where a symbol is defined
-  - Use before tracing callers/callees""",
+        "get_file_outline": """**get_file_outline**: Structural navigation tool that outlines all classes, functions, and methods in a file.
+  - RECOMMENDED for large files (>200 lines) before calling read_file to identify exact symbol line ranges.
+  - Avoids reading unnecessary code by giving you line-bounded anchors first.""",
 
-        "read_file": """**read_file**: Use to inspect actual source code and implementation details.
-  - This is the primary tool for understanding HOW something is implemented
-  - Use when you've identified a relevant file
-  - Use to verify implementation, understand control flow, check error handling
-  - Do not make detailed implementation claims from search results alone""",
+        "query_rim": """**query_rim**: Bounded graph investigation tool for structural relationships (CALLS, IMPORTS, INHERITS, CONTAINS, ROUTE_HANDLER, DATABASE_ACCESS, GENERIC).
+  - Use when the question asks about callers, callees, dependencies, imports, inheritance, route handlers, or database table access.
+  - Use scope='LOCAL' (default, 1 hop) for direct callers/callees.
+  - Use scope='NEIGHBORHOOD' (depth 1-3) for multi-hop tracing across components.
+  - If query_rim returns NO_STATIC_EDGE_FOUND, do NOT assume the relationship does not exist; dynamic JS/TS execution or callbacks may exist. Follow the suggested fallback (search_repository) to inspect the implementation.""",
 
-        "get_callers": """**get_callers**: Use to find what invokes a function or method.
-  - "Who calls X?" / "Where is X used?" / "What code reaches X?\"""",
-
-        "get_callees": """**get_callees**: Use to find what a function or method invokes.
-  - "What does X call?" / "What dependencies does X invoke?"
-  - Pair with read_file to understand actual behavior""",
-
-        "get_route": """**get_route**: Use for HTTP/REST API questions.
-  - Which endpoint handles a path?
-  - What handler serves an endpoint?
-  - What HTTP method is used?
-  - After identifying a route, use symbol/source tools to understand implementation""",
-
-        "get_file_outline": """**get_file_outline**: Get an outline of symbols in a file.
-  - Use to see all functions, classes, and methods in a file at once""",
-
-        "search_repository": """**search_repository**: Use to search by name or pattern across the repository.
-  - Use for initial discovery of files and symbols
-  - Supports comma-separated queries for batch lookups""",
-
-        "get_feature": """**get_feature**: Use for questions about detected architectural capabilities.
-  - Do not use as substitute for reading implementation code""",
-
-        "get_dependencies": """**get_dependencies**: Use for third-party package and dependency questions.
-  - Use source searches when asking HOW a dependency is used""",
-
-        "trace_feature": """**trace_feature**: Use for end-to-end architectural/execution tracing.
-  - Use when the question requires following: endpoint → handler → business logic → database
-  - Do not use merely because a question mentions an endpoint or function""",
-
-        "query_rim": """**query_rim**: Use to query the Repository Intelligence Model for structural facts.
-  - Use when the question involves relationships, dependencies, or connections
-  - Can identify: CALLS, IMPORTS, INHERITS, CONTAINS, ROUTE_HANDLER, DATABASE_ACCESS""",
+        "read_file": """**read_file**: Authoritative tool for inspecting actual code implementation and verifying behavior.
+  - Primary tool for understanding HOW something works.
+  - Always specify start_line and end_line covering the relevant block (e.g., start_line=120, end_line=180).
+  - Use optional context_lines to include surrounding context without making extra calls.
+  - Never make implementation claims from search or graph results alone without reading source code.""",
     }
 
     # Shared behavioral/grounding rules for all tool-calling formats
-    REPOSITORY_ANALYSIS_RULES = """You are an expert software repository analysis assistant specialized in GitOnboard.
+    REPOSITORY_ANALYSIS_RULES = """You are an expert software repository analysis assistant.
 
 Your job is to answer the user's question accurately using the repository tools available to you.
 
@@ -123,36 +134,38 @@ Do not invent repository-specific facts.
 When making a claim about how this codebase works, base it on information obtained from the repository tools.
 You may use general programming knowledge to interpret repository evidence and explain concepts, but clearly distinguish inference from facts directly observed.
 
-## REPOSITORY ARCHITECTURE CONTEXT
+## REPOSITORY CONTEXT & TOOL SELECTION
 
-GitOnboard is a Python/TypeScript full-stack application:
-- **Backend**: FastAPI (Python 3.10+), PostgreSQL, Azure Blob Storage
-- **Frontend**: Next.js 16, React 19, TypeScript
-- **Key patterns**: Tree-sitter AST analysis, LangGraph agents, SQLAlchemy ORM, Docker-based services
+The repository being analyzed may be any software project, library, data science workflow, Jupyter notebook collection, or full-stack application.
+Do NOT assume any specific framework (e.g., FastAPI, Django, Spring), database, or architecture unless directly observed via repository tools.
 
-When answering questions, understand that:
-- FastAPI routers serve REST endpoints
-- PostgreSQL stores code facts (symbols, routes, capabilities)
-- Azure Blob Storage (via Azurite in dev) holds repository snapshots
-- Tree-sitter parses source code into symbols and relationships
-- Alembic manages database migrations
+### INTENT-BASED TOOL SELECTION
+
+Select tools based on what evidence you need rather than following a rigid predetermined sequence:
+- **Repository orientation & architecture overview**: Call `get_tree` to discover structure.
+- **Finding symbols, definitions, & files**: Call `search_repository`.
+- **Exact text, regex patterns, & configs (YAML, JSON, Docker)**: Call `search_code`.
+- **Large-file navigation (>200 lines)**: Call `get_file_outline` to locate symbol line boundaries before reading.
+- **Relationships, callers, callees, dependencies, & execution flow**: Call `query_rim` (LOCAL for 1-hop, NEIGHBORHOOD for multi-hop tracing).
+- **Implementation verification**: Call `read_file` with targeted `start_line` and `end_line` (plus optional `context_lines`).
+
+Use the smallest set of tools that provides sufficient evidence. Do not call extra tools merely to appear thorough.
+
+### CODE INSPECTION & EVIDENCE MANDATE
+1. **Search tools and query_rim return pointers, metadata, and snippets**, NOT full implementations.
+2. **Authoritative Verification**: When you identify relevant files and lines (e.g. from search, file outline, or graph relationships), call `read_file` on that specific line range to inspect the actual implementation before concluding.
+3. **Graph Uncertainty & Dynamic Code**: `query_rim` operates on static analysis. If `query_rim` returns `NO_STATIC_EDGE_FOUND`, it means no static edge was found in the graph. It does NOT mean "the relationship definitely does not exist." Dynamic JavaScript/TypeScript constructs (callbacks, arrow functions, middleware pipelines, dynamic imports) may still connect them. Follow the suggested fallback (`search_repository` -> `read_file`) to verify.
+4. **Negative and Absence Claims**: Claims that something is missing, incomplete, or absent (e.g. "There is no vector database" or "authenticate is not called") require thorough search evidence across relevant directories before concluding absence.
+5. **Notebooks are Code**: In data science, machine learning, and AI repositories, `.ipynb` files contain first-class code. Treat them as full code files.
 
 ## INVESTIGATION APPROACH
 
 For every repository-specific question:
-
-1. **Understand** exactly what the user is asking
-2. **Determine** what repository evidence is needed
-3. **Select** the smallest useful set of tools
-4. **Gather** the evidence systematically
-5. **Follow** relevant relationships when necessary
-6. **Check** whether the evidence is sufficient to support the answer
-7. **Answer** the user directly and clearly
-
-Do not stop investigating merely because the first search returns something plausible.
-If an important claim is not sufficiently supported, perform another targeted lookup.
-If the repository does not contain enough evidence to answer confidently, say so rather than guessing.
-A search returning no results does NOT prove that something does not exist.
+1. **Understand** exactly what the user is asking.
+2. **Select appropriate tools** to investigate the question based on intent (search for files/symbols, outline large files, query relationships, or inspect implementation).
+3. **Verify with read_file** to examine actual source code before answering questions about how features work.
+4. **Synthesize & Answer**: Once the necessary evidence is collected and understood, provide the final answer immediately. Do not make extra tool calls if you already have the evidence.
+5. If the repository truly does not contain enough evidence to answer confidently, state what was searched and what could not be found. Do not fabricate missing components.
 
 ## PARALLEL TOOL CALLS
 
@@ -291,9 +304,25 @@ EXECUTION RULES:
 5. Output ONLY the XML tool call, with NO text before or after it
 6. NO EXPLANATIONS: Do not add "Let me search..." or "I found..." - just output the XML"""
 
+    GROUNDING_RULES_NATIVE = f"""{REPOSITORY_ANALYSIS_RULES}
+
+## RESPONSE PROTOCOL (NATIVE TOOL CALLING)
+
+YOUR TASK:
+Use the available tools natively to investigate repository questions and gather evidence. Provide a final answer once you have sufficient information.
+
+1. Analyze the user's question.
+2. Call tools natively whenever you need to inspect files, search code, or query symbols and relationships.
+3. Once you have enough evidence from tools, provide your final answer directly in Markdown.
+4. If you're confident in your answer, provide it immediately - do NOT make unnecessary additional tool calls.
+5. Base repository-specific claims on tool results, never on general assumptions.
+"""
+
     @property
     def GROUNDING_RULES(self) -> str:
         """Return format-specific grounding rules based on model type."""
+        if self.is_native:
+            return self.GROUNDING_RULES_NATIVE
         return self.GROUNDING_RULES_HERMES if self.is_qwen else self.GROUNDING_RULES_JSON
 
     def _build_tool_usage_strategy(self, tool_specs: List[ToolSpec]) -> str:
@@ -362,23 +391,17 @@ Repository Intelligence Graph facts (structural relationships):
 {rim_metadata_block}
 
 **WHEN TO USE QUERY_RIM:**
-Use `query_rim` when the question involves relationships, dependencies, or connections between repository entities. It can identify:
-- CALLS: which functions call which
-- IMPORTS: which modules import which
-- INHERITS: inheritance relationships
-- CONTAINS: what a module/class contains
-- ROUTE_HANDLER: API routes and handlers
-- DATABASE_ACCESS: database interactions
+Use `query_rim` when the question involves relationships, callers/callees, dependencies, or connections between repository entities:
+- CALLS: functions called by or calling an entity
+- IMPORTS: module dependencies (incoming and outgoing)
+- INHERITS: class inheritance and base classes
+- CONTAINS: symbols declared within a file or class
+- ROUTE_HANDLER: route handlers mapped to HTTP endpoints
+- DATABASE_ACCESS: database tables or models accessed by code
 
-**WORKFLOW:**
-1. Search for relevant code using search_repository or find_files
-2. Read source files to understand implementation details
-3. Determine: Does this question need structural relationships?
-   - NO (implementation details, algorithms, syntax) → Answer from source code
-   - YES (dependencies, connections, relationships) → Use query_rim to explore
-4. Combine findings and provide your answer
+Use scope='LOCAL' for direct 1-hop relationships, 'NEIGHBORHOOD' (depth 1-3) for multi-hop tracing, and 'GLOBAL' when repository-wide relationship inspection is required.
 
-**IMPORTANT:** Do not use query_rim just to use RIM. Use it only when relationship information is relevant to answering the question."""
+If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use search_repository and read_file to inspect the implementation directly."""
         else:
             rim_section = ""  # baseline gets no RIM section at all
 
@@ -437,7 +460,7 @@ Use `query_rim` when the question involves relationships, dependencies, or conne
             # Try Hermes format first (native for Qwen)
             result = self._parse_hermes_response(text)
             # If Hermes parsing failed but looks like it tried, don't fall back
-            if result["action"] != "malformed" or "tool_call" in text:
+            if result["action"] != "malformed" or "<tool_call>" in text:
                 return result
             # Context degradation: LLM reverted to JSON, try JSON format as fallback
             logger.debug(f"[parse_response] Hermes parse failed, trying JSON fallback for Qwen")
@@ -449,12 +472,35 @@ Use `query_rim` when the question involves relationships, dependencies, or conne
         """
         Normalize native tool calls or text-parsed tool calls into a uniform list format.
 
-        If llm_response.tool_calls is populated (native provider tool calls, e.g. Gemini):
-            takes only the FIRST tool call and wraps it into the standard dict shape.
-            (Multi-tool parallelism not supported; agent enforces one-tool-per-turn semantics.)
-        Otherwise, falls through to parse_response (text parsing) and wraps single result.
-        For final_answer/malformed, passes through unchanged (no "tool_calls" key).
+        For Groq, Gemini, OpenRouter, and Ollama Cloud (native tool calling):
+          - Always use native tool calling as the primary method.
+          - If llm_response.tool_calls is populated, takes the first tool call.
+          - If no tool calls, returns final_answer directly with llm_response.content.
+          - NO text fallback to Hermes XML or JSON.
+
+        Only for local Ollama models:
+          - Uses Hermes XML (for local Qwen) or JSON action protocol parsing on llm_response.content.
         """
+        is_native = self.is_native or self.is_cloud_model(llm_response.model, llm_response.provider)
+
+        if is_native:
+            if llm_response.tool_calls:
+                tc = llm_response.tool_calls[0]  # Take only first tool call
+                return {
+                    "action": "tool_call",
+                    "tool_calls": [
+                        {"tool_name": tc.tool_name, "arguments": tc.parameters}
+                    ],
+                    "tool_name": tc.tool_name,
+                    "arguments": tc.parameters,
+                }
+            # No tool call made -> This is a final answer directly (NO FALLBACK)
+            return {
+                "action": "final_answer",
+                "answer": llm_response.content,
+            }
+
+        # Local Ollama model behavior (Hermes XML / JSON text protocol):
         if llm_response.tool_calls:
             tc = llm_response.tool_calls[0]  # Take only first tool call
             return {
@@ -462,6 +508,8 @@ Use `query_rim` when the question involves relationships, dependencies, or conne
                 "tool_calls": [
                     {"tool_name": tc.tool_name, "arguments": tc.parameters}
                 ],
+                "tool_name": tc.tool_name,
+                "arguments": tc.parameters,
             }
         result = self.parse_response(llm_response.content)
         if result.get("action") == "tool_call":
@@ -470,6 +518,8 @@ Use `query_rim` when the question involves relationships, dependencies, or conne
                 "tool_calls": [
                     {"tool_name": result["tool_name"], "arguments": result["arguments"]}
                 ],
+                "tool_name": result["tool_name"],
+                "arguments": result["arguments"],
             }
         return result
 
@@ -506,9 +556,8 @@ Use `query_rim` when the question involves relationships, dependencies, or conne
 
         # Regular tool call: extract parameters
         KNOWN_TOOLS = {
-            "search_code", "search_repository", "search_symbols", "get_symbol",
-            "get_file_outline", "get_callers", "get_callees", "get_dependencies",
-            "get_route", "get_feature", "query_rim", "read_file", "find_files", "get_tree"
+            "search_code", "search_repository", "get_file_outline",
+            "query_rim", "read_file", "get_tree"
         }
 
         if invoke_name not in KNOWN_TOOLS:
@@ -590,9 +639,8 @@ Use `query_rim` when the question involves relationships, dependencies, or conne
         # This happens with small models like Qwen 3 4B that don't follow complex instructions
         # Pattern: {"action": "search_code", "arguments": {...}} should be tool_call
         KNOWN_TOOLS = {
-            "search_code", "search_repository", "search_symbols", "get_symbol",
-            "get_file_outline", "get_callers", "get_callees", "get_dependencies",
-            "get_route", "get_feature", "query_rim", "read_file", "find_files", "get_tree"
+            "search_code", "search_repository", "get_file_outline",
+            "query_rim", "read_file", "get_tree"
         }
         if action in KNOWN_TOOLS and obj.get("arguments"):
             # LLM mistakenly used tool name as action. Correct it.
