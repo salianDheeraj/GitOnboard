@@ -813,7 +813,7 @@ function VisualReducersController({
         const res: any = { ...data };
         if (node === activeFocusNode) {
           res.highlighted = true;
-          res.size = Math.min(24, (data.size || 8) * 1.35);
+          res.size = Math.min(26, (data.size || 8) * 1.4);
           res.forceLabel = true;
           res.zIndex = 10;
         } else if (neighborSet.has(node)) {
@@ -821,8 +821,9 @@ function VisualReducersController({
           res.forceLabel = true;
           res.zIndex = 5;
         } else {
+          // Strictly hide all unrelated nodes so only the focus node and its connections are visible
+          res.hidden = true;
           res.label = '';
-          res.color = dimmedNodeColor;
           res.zIndex = 0;
         }
         return res;
@@ -832,10 +833,11 @@ function VisualReducersController({
         const ext = graph.extremities(edge);
         const isConnected = ext[0] === activeFocusNode || ext[1] === activeFocusNode;
         if (isConnected) {
-          res.size = 2.0;
+          res.size = 2.2;
           res.color = activeEdgeColor;
           res.zIndex = 10;
         } else {
+          // Hide all non-connected edges
           res.hidden = true;
           res.zIndex = 0;
         }
@@ -1072,10 +1074,11 @@ function GraphControlsBar({
 
       <button
         onClick={() => reset({ duration: 300 })}
-        className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-        title="Reset Camera View"
+        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium transition-colors"
+        title="Reset Zoom & Camera View"
       >
         <Maximize2 className="w-4 h-4" />
+        <span>Reset View</span>
       </button>
 
       <div className="w-[1px] h-4 bg-slate-200 dark:bg-slate-800 mx-1" />
