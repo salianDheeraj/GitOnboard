@@ -378,7 +378,14 @@ function GraphLayoutAndEventsController({
       // ── DRAGGING (runs 12 iterations/frame with low slowdown for fast, instantaneous elastic spring tracking) ──
       if (currentMode === 'DRAGGING') {
         runFA2Step(g, 12, 0.3, false, extraRadiusPadding);
-        sigma.refresh();
+        try {
+          const container = typeof sigma.getContainer === 'function' ? sigma.getContainer() : null;
+          if (!container || (container.offsetWidth > 0 && container.offsetHeight > 0)) {
+            sigma.refresh();
+          }
+        } catch {
+          // Ignore transient container resize / layout refresh errors
+        }
         animFrameRef.current = requestAnimationFrame(step);
         return;
       }
@@ -450,7 +457,14 @@ function GraphLayoutAndEventsController({
         }
 
         // Active layout continues: refresh WebGL view and request next frame
-        sigma.refresh();
+        try {
+          const container = typeof sigma.getContainer === 'function' ? sigma.getContainer() : null;
+          if (!container || (container.offsetWidth > 0 && container.offsetHeight > 0)) {
+            sigma.refresh();
+          }
+        } catch {
+          // Ignore transient container resize / layout refresh errors
+        }
         animFrameRef.current = requestAnimationFrame(step);
         return;
       }
@@ -1117,6 +1131,7 @@ export default function SigmaKnowledgeGraphCanvas({
       zIndex: true,
       stagePadding: 50,
       autoRescale: true,
+      allowInvalidContainer: true,
     }),
     [isDark, drawNodeLabel, drawNodeHover]
   );
