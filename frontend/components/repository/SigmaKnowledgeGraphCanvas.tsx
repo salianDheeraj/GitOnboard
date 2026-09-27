@@ -24,6 +24,7 @@ import {
   NODE_TYPE_COLORS,
   EDGE_COLORS_DARK,
   EDGE_COLORS_LIGHT,
+  SEMANTIC_EDGE_WEIGHTS,
 } from './graphModel';
 
 export { buildInitialGraph, injectExpansionData } from './graphModel';
@@ -78,6 +79,21 @@ export const STABLE_MAX_THRESHOLD = 0.06;              // Maximum displacement o
 export const REQUIRED_CONSECUTIVE_STABLE_CHECKS = 10; // Consecutive frames both thresholds must be met
 export const MAX_SAFETY_CAP_FRAMES = 2500;            // Emergency safety fallback limit to prevent infinite loops; NEVER normal termination
 const DRAG_THRESHOLD_PX = 5;                           // Screen pixels of movement required to enter drag mode
+
+// ==========================================
+// Drag Elastic Spring Parameters
+// ==========================================
+// Applies temporary restorative spring force to directly connected neighbors during node dragging.
+// High-weight structural edges receive stronger spring pull; weak dependencies receive gentle pull.
+export const DRAG_SPRING_STIFFNESS = 0.35;             // Spring constant k: fraction of stretch restored per frame
+export const DRAG_SPRING_MAX_DISPLACEMENT = 25.0;      // Hard displacement cap (graph units) per frame to ensure stability
+export const DRAG_SPRING_MIN_EXTENSION = 0.0;          // Deadzone before spring engages (0 = engages on any stretch)
+
+export interface DragSpringNeighbor {
+  neighborId: string;
+  restLength: number;
+  weight: number;
+}
 
 // ==========================================
 // ForceAtlas2 tuning parameters
@@ -262,6 +278,7 @@ function GraphLayoutAndEventsController({
   const pointerDownScreenPosRef = useRef<{ x: number; y: number } | null>(null);
   const lastClickTimeRef = useRef<number>(0);
   const lastClickNodeRef = useRef<string | null>(null);
+  const dragSpringNeighborsRef = useRef<DragSpringNeighbor[]>([]);
 
   // Focus camera on searched/selected node without restarting layout
   useEffect(() => {
@@ -375,9 +392,54 @@ function GraphLayoutAndEventsController({
       frameRef.current++;
       const frame = frameRef.current;
 
-      // ── DRAGGING (runs 12 iterations/frame with low slowdown for fast, instantaneous elastic spring tracking) ──
+      // ── DRAGGING (runs moderate FA2 step + temporary restoring spring force to directly connected neighbors) ──
       if (currentMode === 'DRAGGING') {
-        runFA2Step(g, 12, 0.3, false, extraRadiusPadding);
+        // Step 1: Run standard ForceAtlas2 step for global layout consistency
+        runFA2Step(g, 2, 1.25, false, extraRadiusPadding);
+
+        // Step 2: Apply temporary spring force to directly connected neighbors
+        const draggedNodeId = pointerDownNodeRef.current;
+        const springs = dragSpringNeighborsRef.current;
+        if (draggedNodeId && g.hasNode(draggedNodeId) && springs.length > 0) {
+          const draggedX = g.getNodeAttribute(draggedNodeId, 'x');
+          const draggedY = g.getNodeAttribute(draggedNodeId, 'y');
+
+          for (let i = 0; i < springs.length; i++) {
+            const { neighborId, restLength, weight } = springs[i];
+            if (!g.hasNode(neighborId)) continue;
+            // The dragged node or any explicitly pinned node must never be moved by spring
+            if (g.getNodeAttribute(neighborId, 'fixed')) continue;
+
+            const nX = g.getNodeAttribute(neighborId, 'x');
+            const nY = g.getNodeAttribute(neighborId, 'y');
+            const dx = draggedX - nX;
+            const dy = draggedY - nY;
+            const currentDist = Math.hypot(dx, dy);
+
+            // Calculate edge extension beyond initial rest length
+            const extension = currentDist - restLength;
+
+            // Only apply restoring spring force when edge is stretched beyond rest length
+            // When compressed (extension <= 0), let ForceAtlas2's normal repulsion handle separation
+            if (extension > DRAG_SPRING_MIN_EXTENSION && currentDist > 0.001) {
+              // Normalized unit vector pointing from neighbor toward the dragged node
+              const ux = dx / currentDist;
+              const uy = dy / currentDist;
+
+              // Spring pull: F = k * extension * normalized_weight
+              // Weight scale: baseline 1.0 (CONTAINS/DECLARES=2.0 -> 2x pull, CALLS/IMPORTS=0.5 -> 0.5x pull)
+              const weightFactor = Math.max(0.2, weight);
+              const rawDisplacement = DRAG_SPRING_STIFFNESS * extension * weightFactor;
+
+              // Cap maximum spring displacement per frame to prevent oscillation or overshoot
+              const clampedDisplacement = Math.min(rawDisplacement, DRAG_SPRING_MAX_DISPLACEMENT);
+
+              g.setNodeAttribute(neighborId, 'x', nX + ux * clampedDisplacement);
+              g.setNodeAttribute(neighborId, 'y', nY + uy * clampedDisplacement);
+            }
+          }
+        }
+
         try {
           const container = typeof sigma.getContainer === 'function' ? sigma.getContainer() : null;
           if (!container || (container.offsetWidth > 0 && container.offsetHeight > 0)) {
@@ -568,6 +630,43 @@ function GraphLayoutAndEventsController({
           const graph = sigma.getGraph();
           if (graph.hasNode(node)) {
             graph.setNodeAttribute(node, 'fixed', true);
+
+            // Record incident edges and initial rest lengths for temporary drag spring
+            const springs: DragSpringNeighbor[] = [];
+            const nodeX = graph.getNodeAttribute(node, 'x');
+            const nodeY = graph.getNodeAttribute(node, 'y');
+
+            graph.forEachNeighbor(node, (neighbor: string, attr: any) => {
+              if (neighbor === node) return;
+              const nX = attr.x ?? 0;
+              const nY = attr.y ?? 0;
+              const initialDist = Math.hypot(nodeX - nX, nodeY - nY);
+
+              // Find maximum semantic weight among parallel edges between node and neighbor
+              let maxWeight = 1.0;
+              let foundEdge = false;
+              graph.forEachEdge(node, neighbor, (_edge: string, edgeAttr: any) => {
+                foundEdge = true;
+                const w =
+                  edgeAttr.weight ??
+                  (edgeAttr.relType ? SEMANTIC_EDGE_WEIGHTS[edgeAttr.relType] : undefined) ??
+                  SEMANTIC_EDGE_WEIGHTS.GENERIC ??
+                  1.0;
+                if (w > maxWeight) maxWeight = w;
+              });
+
+              if (!foundEdge) {
+                maxWeight = SEMANTIC_EDGE_WEIGHTS.GENERIC ?? 1.0;
+              }
+
+              springs.push({
+                neighborId: neighbor,
+                restLength: Math.max(initialDist, 1.0),
+                weight: maxWeight,
+              });
+            });
+
+            dragSpringNeighborsRef.current = springs;
           }
           sigma.getCamera().disable();
           startLayout('DRAGGING');
@@ -591,6 +690,7 @@ function GraphLayoutAndEventsController({
         pointerDownNodeRef.current = null;
         pointerDownScreenPosRef.current = null;
         isDraggingRef.current = false;
+        dragSpringNeighborsRef.current = [];
 
         if (wasDragging) {
           sigma.getCamera().enable();
@@ -614,6 +714,7 @@ function GraphLayoutAndEventsController({
         pointerDownNodeRef.current = null;
         pointerDownScreenPosRef.current = null;
         isDraggingRef.current = false;
+        dragSpringNeighborsRef.current = [];
 
         if (wasDragging) {
           sigma.getCamera().enable();
@@ -648,6 +749,7 @@ function GraphLayoutAndEventsController({
         pointerDownNodeRef.current = null;
         pointerDownScreenPosRef.current = null;
         isDraggingRef.current = false;
+        dragSpringNeighborsRef.current = [];
 
         sigma.getCamera().enable();
         const graph = sigma.getGraph();
@@ -658,6 +760,7 @@ function GraphLayoutAndEventsController({
       } else {
         pointerDownNodeRef.current = null;
         pointerDownScreenPosRef.current = null;
+        dragSpringNeighborsRef.current = [];
       }
     };
 
