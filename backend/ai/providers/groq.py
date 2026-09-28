@@ -97,6 +97,14 @@ class GroqProvider:
 
         Blocks until any active cooldown expires and capacity (both requests and tokens) is available.
         """
+        # Enforce single-request ceiling before window rate checks
+        if estimated_tokens > MAX_TOKENS_PER_MINUTE:
+            raise NonRetriableError(
+                f"Request estimated at {estimated_tokens} tokens exceeds Groq single-request/TPM limit of {MAX_TOKENS_PER_MINUTE}. "
+                "Context compaction required before transmission.",
+                413,
+            )
+
         while True:
             # 1. Respect Groq cooldown time
             while True:
@@ -383,8 +391,14 @@ class GroqProvider:
 
         usage_data = data.get("usage", {})
         actual_total_tokens = usage_data.get("total_tokens", 0)
+        prompt_tokens = usage_data.get("prompt_tokens", 0)
+        completion_tokens = usage_data.get("completion_tokens", 0)
         if actual_total_tokens > 0:
             self._record_actual_tokens(actual_total_tokens, estimated_tokens, reservation_ts)
+            logger.info(
+                f"[Groq Telemetry] estimated_tokens={estimated_tokens}, actual_prompt_tokens={prompt_tokens}, "
+                f"actual_total={actual_total_tokens}, diff={actual_total_tokens - estimated_tokens}"
+            )
 
         message = data["choices"][0]["message"]
         content = message.get("content") or ""

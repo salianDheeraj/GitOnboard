@@ -48,18 +48,18 @@ def build_default_service() -> "LLMService":
         return LLMService(providers=providers)
 
     if deployment_type == "PROD":
+        from backend.config import settings
         # 1. Gemini (Priority 1 in PROD)
         gemini_key = os.environ.get("GEMINI_API_KEY", "")
         if gemini_key:
             from .providers.gemini import GeminiProvider
-            providers.append(GeminiProvider(api_key=gemini_key))
+            providers.append(GeminiProvider(api_key=gemini_key, model=settings.gemini_model))
             logger.info("LLMService: PROD mode - GeminiProvider registered.")
 
         # 2. Groq (Priority 2 in PROD)
         groq_key = os.environ.get("GROQ_API_KEY", "")
         if groq_key:
             from .providers.groq import GroqProvider
-            from backend.config import settings
             providers.append(GroqProvider(api_key=groq_key, model=settings.groq_model))
             logger.info("LLMService: PROD mode - GroqProvider registered.")
 
@@ -67,7 +67,7 @@ def build_default_service() -> "LLMService":
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         if openrouter_key:
             from .providers.openrouter import OpenRouterProvider
-            providers.append(OpenRouterProvider(api_key=openrouter_key))
+            providers.append(OpenRouterProvider(api_key=openrouter_key, model=settings.openrouter_model))
             logger.info("LLMService: PROD mode - OpenRouterProvider registered.")
 
         if not providers:
