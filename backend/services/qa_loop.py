@@ -17,6 +17,7 @@ from backend.agent.loop.contracts import AgentLoopConfig, StopReason, ToolObserv
 from backend.agent.loop.guardrails import LoopGuardrails
 from backend.ai.service import LLMService
 from backend.ai.schemas import LLMRequest, Message, MessageRole, Tool
+from backend.ai.tokencount.registry import count_full_request
 from backend.config import settings
 from backend.services.qa_protocol import QAProtocolAdapter
 
@@ -118,6 +119,7 @@ class QALoop:
         config: AgentLoopConfig,
         system_prompt_parts: SystemPromptParts,
         model: Optional[str] = None,
+        provider: Optional[str] = None,
         structured_logger: Optional["StructuredLogger"] = None,
         request_id: Optional[str] = None,
         repository: Optional[str] = None,
@@ -129,6 +131,7 @@ class QALoop:
         self.config = config
         self.system_prompt_parts = system_prompt_parts
         self.model = model
+        self.provider = provider
         self.guardrails = LoopGuardrails(config)
         self.structured_logger = structured_logger
         self.request_id = request_id
@@ -142,6 +145,146 @@ class QALoop:
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
         """Backward compatibility helper delegating to protocol_adapter."""
         return self.protocol_adapter.parse_response(response_text)
+
+    def _get_provider_budget_profile(self) -> Dict[str, Any]:
+        """
+        Derive the 4 distinct constraints and safe application budget for the active provider/model:
+        - context_window
+        - input_tpm
+        - single_request_limit
+        - application_safety_budget
+        """
+        model_name = (self.model or "").strip()
+        provider = (self.provider or "").strip().lower()
+
+        # 1. Check self.provider if explicitly set
+        if not provider:
+            # 2. Check active providers attached to llm_service
+            active_providers = getattr(self.llm_service, "providers", [])
+            if active_providers and hasattr(active_providers[0], "provider_name"):
+                provider = active_providers[0].provider_name.lower()
+
+        # 3. If still unknown, infer strictly from model name
+        if not provider:
+            m_lower = model_name.lower()
+            if "gemini" in m_lower:
+                provider = "gemini"
+            elif "groq" in m_lower or "gpt-oss" in m_lower:
+                provider = "groq"
+            elif "openrouter" in m_lower or "nemotron" in m_lower:
+                provider = "openrouter"
+            elif "qwen" in m_lower or "llama" in m_lower:
+                provider = "ollama"
+
+        if not provider:
+            logger.error(
+                f"[QALoop] Provider could not be determined for token budgeting (model='{self.model}', "
+                f"llm_service={self.llm_service}). Missing provider information."
+            )
+            raise ValueError(
+                f"[QALoop] Provider information is required for token budgeting but was not provided and could not be determined for model='{self.model}'."
+            )
+
+        if provider == "groq":
+            context_window = settings.groq_context_window
+            input_tpm = settings.groq_input_tpm
+            single_request_limit = settings.groq_single_request_limit
+            safety_margin = settings.groq_safety_margin_tokens
+            control_reservation = settings.groq_control_reservation_tokens
+            output_reservation = settings.groq_output_reservation_tokens
+        elif provider == "gemini":
+            context_window = settings.gemini_context_window
+            input_tpm = settings.gemini_input_tpm
+            single_request_limit = settings.gemini_single_request_limit
+            safety_margin = settings.gemini_safety_margin_tokens
+            control_reservation = settings.gemini_control_reservation_tokens
+            output_reservation = settings.gemini_output_reservation_tokens
+        elif provider == "openrouter":
+            context_window = settings.openrouter_context_window
+            input_tpm = settings.openrouter_input_tpm
+            single_request_limit = settings.openrouter_single_request_limit or 100000
+            safety_margin = settings.openrouter_safety_margin_tokens
+            control_reservation = settings.openrouter_control_reservation_tokens
+            output_reservation = settings.openrouter_output_reservation_tokens
+        else:
+            # Local / Ollama
+            context_window = 32768
+            input_tpm = 0
+            single_request_limit = 32768
+            safety_margin = 1000
+            control_reservation = 100
+            output_reservation = 2048
+
+        # Calculate safe application budget
+        effective_limit = single_request_limit
+        if input_tpm and input_tpm > 0:
+            effective_limit = min(effective_limit, input_tpm)
+
+        safe_budget = max(
+            1000,
+            effective_limit - safety_margin - control_reservation - output_reservation
+        )
+
+        return {
+            "provider": provider,
+            "model": self.model or model_name,
+            "context_window": context_window,
+            "input_tpm": input_tpm,
+            "single_request_limit": single_request_limit,
+            "safety_margin": safety_margin,
+            "control_reservation": control_reservation,
+            "output_reservation": output_reservation,
+            "safe_budget": safe_budget,
+        }
+
+    def _compact_messages_deterministically(self, messages: List[Dict[str, Any]], target_tokens: int) -> List[Dict[str, Any]]:
+        """
+        Deterministic, rule-based context compaction. ZERO LLM summarization.
+        Pass 1: Deduplicate redundant tool reads for the same path.
+        Pass 2: Compact older tool observations (>1 turn old) to structural outlines.
+        Pass 3: Truncate oversized recent observation bodies.
+        """
+        if len(messages) <= 1:
+            return messages
+
+        user_query_msg = messages[0]
+        conversation = list(messages[1:])
+
+        # Pass 1: Deduplicate file reads (keep latest read per file path)
+        seen_paths = set()
+        for idx in range(len(conversation) - 1, -1, -1):
+            msg = conversation[idx]
+            content = msg.get("content", "")
+            # Identify file read observation or assistant read_file call
+            match = re.search(r"read_file\(path=['\"]([^'\"]+)['\"]", content) or re.search(r"lines of ([^\s:]+)", content)
+            if match:
+                path = match.group(1)
+                if path in seen_paths:
+                    msg["content"] = f"[Deduplicated older observation for '{path}']"
+                else:
+                    seen_paths.add(path)
+
+        # Pass 2: Compact older observations (> 2 messages from the end)
+        for idx in range(len(conversation) - 2):
+            msg = conversation[idx]
+            content = msg.get("content", "")
+            if "[Deduplicated" in content:
+                continue
+            if len(content) > 300:
+                lines = content.splitlines()
+                header = lines[0] if lines else ""
+                msg["content"] = f"{header}\n... [Older observation compacted to outline ({len(lines)} lines)] ..."
+
+        # Pass 3: If still heavy, compact non-deduplicated earliest messages
+        for idx in range(len(conversation) - 1):
+            msg = conversation[idx]
+            content = msg.get("content", "")
+            if "[Deduplicated" in content:
+                continue
+            if len(content) > 200:
+                msg["content"] = content[:150] + "\n... [Compacted] ..."
+
+        return [user_query_msg] + conversation
 
     async def run(self, question: str) -> QALoopResult:
         """
@@ -211,39 +354,27 @@ class QALoop:
             turn_start = time.perf_counter()
 
             try:
-                # CONTEXT WINDOWING: Always preserve initial user query (messages[0])
-                # and keep the last N-1 messages for recent tool context to prevent token explosion
-                window_size = 8  # Keep user query + up to 7 recent tool turns
-                if len(messages) > window_size and len(messages) > 1:
-                    user_query_msg = messages[0]
-                    recent_messages = messages[-(window_size - 1):]
-                    windowed_messages = [user_query_msg] + recent_messages
-                    logger.debug(f"[QALoop] Context windowing: preserved user query + last {len(recent_messages)} of {len(messages)} messages")
-                else:
-                    windowed_messages = messages
+                # PROVIDER-AWARE TOKEN BUDGET & CONTEXT MANAGEMENT
+                profile = self._get_provider_budget_profile()
+                safe_budget = profile["safe_budget"]
+                is_rim = self.mode == "rim"
+                tool_specs = self.tool_dispatch.specs(include_rim=is_rim)
+                schema_tools = _tool_specs_to_schema_tools(tool_specs) if tool_specs else None
 
-                # Build LLMRequest with system prompt as first message
+                # Build draft request
                 llm_messages = [
                     Message(role=MessageRole.SYSTEM, content=self.system_prompt_parts.full_text),
                 ]
-                for msg in windowed_messages:
+                for msg in messages:
                     try:
                         role_str = msg.get("role", "user").lower() if isinstance(msg, dict) else "user"
                         role = MessageRole(role_str) if role_str in ["system", "user", "assistant", "tool"] else MessageRole.USER
                         content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
-                        # Preserve native tool_calls from providers (e.g., OpenRouter, Gemini)
                         tool_calls = msg.get("tool_calls") if isinstance(msg, dict) else None
                         llm_messages.append(Message(role=role, content=content, tool_calls=tool_calls))
                     except Exception as msg_err:
-                        logger.error(f"[QALoop] Error processing message: {msg_err}, msg type: {type(msg)}")
+                        logger.error(f"[QALoop] Error processing message: {msg_err}")
                         raise
-
-                logger.debug(f"[QALoop] Turn {turn_index}: Built {len(llm_messages)} messages (system + {len(messages)} conversation)")
-
-                # Compute tool specs for this request (needed for native tool-calling providers like Gemini)
-                is_rim = self.mode == "rim"
-                tool_specs = self.tool_dispatch.specs(include_rim=is_rim)
-                schema_tools = _tool_specs_to_schema_tools(tool_specs) if tool_specs else None
 
                 request = LLMRequest(
                     messages=llm_messages,
@@ -252,35 +383,71 @@ class QALoop:
                     max_tokens=settings.llm_max_tokens,
                     tools=schema_tools,
                 )
+
+                # Preflight check: count complete request tokens
+                counted = await count_full_request(request, profile["provider"], profile["model"])
+                logger.debug(
+                    f"[QALoop] Turn {turn_index}: Preflight count={counted.total_tokens} tokens "
+                    f"(method={counted.method}, exact={counted.is_exact}) vs safe_budget={safe_budget}"
+                )
+
+                # If request exceeds safe budget, apply deterministic multi-pass compaction
+                if counted.total_tokens > safe_budget and len(messages) > 1:
+                    logger.warning(
+                        f"[QALoop] Turn {turn_index}: Request size ({counted.total_tokens} tokens) "
+                        f"exceeds safe budget ({safe_budget} tokens). Running deterministic compaction..."
+                    )
+                    compacted_messages = self._compact_messages_deterministically(messages, safe_budget)
+                    # Rebuild messages
+                    llm_messages = [
+                        Message(role=MessageRole.SYSTEM, content=self.system_prompt_parts.full_text),
+                    ]
+                    for msg in compacted_messages:
+                        role_str = msg.get("role", "user").lower() if isinstance(msg, dict) else "user"
+                        role = MessageRole(role_str) if role_str in ["system", "user", "assistant", "tool"] else MessageRole.USER
+                        content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+                        tool_calls = msg.get("tool_calls") if isinstance(msg, dict) else None
+                        llm_messages.append(Message(role=role, content=content, tool_calls=tool_calls))
+
+                    request = LLMRequest(
+                        messages=llm_messages,
+                        model=self.model,
+                        temperature=0.2,
+                        max_tokens=settings.llm_max_tokens,
+                        tools=schema_tools,
+                    )
+                    counted_after = await count_full_request(request, profile["provider"], profile["model"])
+                    logger.info(
+                        f"[QALoop] Post-compaction request tokens: {counted.total_tokens} -> {counted_after.total_tokens} tokens"
+                    )
+
                 llm_response = await self.llm_service.generate(request)
                 logger.debug(f"[QALoop] Turn {turn_index}: LLM response ({len(llm_response.content)} chars)")
                 self._context_overflow_retries = 0  # Reset retry counter on success
             except Exception as e:
                 err_str = str(e).lower()
-                is_context_overflow = (
+                is_recoverable_limit = (
                     "exceeds the available context size" in err_str
                     or "exceed_context_size_error" in err_str
                     or "maximum context length" in err_str
                     or "context length exceeded" in err_str
+                    or "rate_limit_exceeded" in err_str
+                    or "tokens per minute" in err_str
+                    or "tpm" in err_str
+                    or "request too large" in err_str
+                    or "413" in err_str
+                    or "resource_exhausted" in err_str
+                    or getattr(e, "status_code", None) == 413
                 )
                 retries = getattr(self, "_context_overflow_retries", 0)
-                if is_context_overflow and retries < 2:
+                if is_recoverable_limit and retries < 2:
                     self._context_overflow_retries = retries + 1
-                    logger.warning(f"[QALoop] Context overflow detected at turn {turn_index}. Pruning observations and continuing loop (retry {self._context_overflow_retries}/2)...")
-
-                    # Prune large tool observation bodies in messages to save tokens
-                    for msg in messages:
-                        c = msg.get("content", "")
-                        if len(c) > 600:
-                            msg["content"] = c[:300] + "\n... [Observation trimmed to recover from context overflow] ..."
-
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "[SYSTEM WARNING: Context window limit reached. Older tool outputs were trimmed to recover context. "
-                            "Do not attempt to read full files; use narrow line ranges (start_line, end_line) or provide your final answer based on observed code.]"
-                        )
-                    })
+                    logger.warning(
+                        f"[QALoop] Recoverable provider limit/413 detected at turn {turn_index}. "
+                        f"Compacting observations and retrying ({self._context_overflow_retries}/2)..."
+                    )
+                    # Emergency compaction of conversation history
+                    messages = self._compact_messages_deterministically(messages, safe_budget // 2)
                     continue
 
                 logger.error(f"[QALoop] LLM call failed: {e}", exc_info=True)
@@ -447,14 +614,28 @@ class QALoop:
                     result.answer = answer
                     break
 
-                # 6. Execute tool
+                # 6. Execute tool with pre-calculated content token budget
                 logger.debug(f"[QALoop] Turn {turn_index}: executing tool '{tool_name}'")
                 tool_start = time.perf_counter()
                 loop_elapsed = (tool_start - loop_start) * 1000
                 print(f"[QALoop:EXEC] T+{loop_elapsed:.0f}ms turn={turn_index} executing {tool_name}")
 
+                # Calculate remaining token budget available for tool output before execution
+                profile = self._get_provider_budget_profile()
+                control_res = profile.get("control_reservation", 60)
+                safe_budget = profile["safe_budget"]
+                # Approximate current conversation tokens
+                current_chars = len(self.system_prompt_parts.full_text) + sum(len(m.get("content", "")) for m in messages if isinstance(m, dict))
+                est_current_tokens = int(current_chars / 3.5)
+                remaining_for_tool = max(500, safe_budget - est_current_tokens - control_res)
+
                 try:
-                    tool_observation = self.tool_dispatch.dispatch(tool_name, arguments)
+                    tool_observation = self.tool_dispatch.dispatch(
+                        tool_name,
+                        arguments,
+                        max_content_tokens=remaining_for_tool,
+                        control_reservation_tokens=control_res,
+                    )
                 except Exception as e:
                     logger.error(f"[QALoop] Tool dispatch error: {e}", exc_info=True)
                     tool_observation = ToolObservation(

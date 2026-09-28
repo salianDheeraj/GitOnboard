@@ -23,6 +23,7 @@ class LLMAnalysisService:
         graph_traverser: Optional[FactStoreGraphTraverser] = None,
         target_resolver: Optional[TargetEntityResolver] = None,
         model: str = "qwen3:4b-instruct",
+        provider: Optional[str] = None,
         config: Optional[AgentLoopConfig] = None,
         rim_metadata_block: Optional[str] = None,
         on_turn_callback: Optional[Callable[[QALoopTurn], None]] = None,
@@ -36,6 +37,7 @@ class LLMAnalysisService:
         self.graph_traverser = graph_traverser
         self.target_resolver = target_resolver
         self.model = model
+        self.provider = provider
         self.config = config
         self.rim_metadata_block = rim_metadata_block
         self.on_turn_callback = on_turn_callback
@@ -78,6 +80,7 @@ class LLMAnalysisService:
             tool_dispatch=tool_dispatch,
             system_prompt_parts=prompt_parts,
             model=self.model,
+            provider=self.provider,
             config=self.config,
             on_turn=self.on_turn_callback,
             structured_logger=self.structured_logger,
@@ -97,6 +100,7 @@ def build_analysis_service(
     analysis_id: Optional[int],
     user_id: int,
     model: str,
+    provider: Optional[str] = None,
     tool_layer: Optional[RepositoryToolLayer] = None,
     repo_root: Optional[str] = None,
     config: Optional[AgentLoopConfig] = None,
@@ -161,6 +165,7 @@ def build_analysis_service(
         graph_traverser=graph_traverser,
         target_resolver=target_resolver,
         model=model,
+        provider=provider,
         config=config,
         rim_metadata_block=rim_metadata_block,
         on_turn_callback=on_turn_callback,

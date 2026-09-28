@@ -328,8 +328,8 @@ async def analyze_repository_stream(
             if request.model:
                 os.environ["OLLAMA_MODEL"] = model
 
-            # Cloud models use their actual model names (gemini-2.0-flash, qwen/qwen3.8-27b, gpt-4-turbo, etc.)
-            model_for_llm = None if model in (settings.gemini_model, settings.groq_model, settings.openrouter_model) else model
+            # Pass explicit model name so downstream QALoop and token counters know the active model
+            model_for_llm = model
 
             # 4. Initialize structured logging
             structured_log = StructuredLogger(session_id=current_user.id, repository=repo_display_name)
@@ -345,6 +345,7 @@ async def analyze_repository_stream(
                 gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
                 gemini_provider = GeminiProvider(api_key=gemini_api_key, model=model)
                 llm_service = LLMService(providers=[gemini_provider])
+                selected_provider = "gemini"
                 logger.info(f"[router] Using Gemini provider for model {model}")
 
             elif model == settings.groq_model:
@@ -353,6 +354,7 @@ async def analyze_repository_stream(
                 groq_api_key = os.environ.get("GROQ_API_KEY", "")
                 groq_provider = GroqProvider(api_key=groq_api_key, model=model)
                 llm_service = LLMService(providers=[groq_provider])
+                selected_provider = "groq"
                 logger.info(f"[router] Using Groq provider for model {model}")
 
             elif model == settings.openrouter_model:
@@ -361,6 +363,7 @@ async def analyze_repository_stream(
                 openrouter_api_key = os.environ.get("OPENROUTER_API_KEY", "")
                 openrouter_provider = OpenRouterProvider(api_key=openrouter_api_key, model=model)
                 llm_service = LLMService(providers=[openrouter_provider])
+                selected_provider = "openrouter"
                 logger.info(f"[router] Using OpenRouter provider for model {model}")
 
             elif model.startswith("qwen"):
@@ -377,11 +380,13 @@ async def analyze_repository_stream(
                     llm_service = LLMService(providers=[primary_provider, fallback_provider])
                 else:
                     llm_service = LLMService(providers=[primary_provider])
+                selected_provider = "ollama"
                 logger.info(f"[router] Using Ollama provider for model {model}")
 
             else:
                 # Unknown model - use default service chain (should not reach here due to validation)
                 llm_service = get_llm_service()
+                selected_provider = llm_service.providers[0].provider_name if getattr(llm_service, "providers", None) else None
                 logger.info(f"[router] Using default cloud provider chain for model {model}")
 
             repo_root = resolve_repo_root(repo_name=repo_display_name, user_id=current_user.id, db=db) if repo else None
@@ -454,6 +459,7 @@ async def analyze_repository_stream(
                 analysis_id=analysis_id,
                 user_id=current_user.id,
                 model=model_for_llm,
+                provider=selected_provider,
                 repo_root=repo_root,
                 rim_metadata_block=repo_context or None,
                 on_turn_callback=on_turn_callback,
