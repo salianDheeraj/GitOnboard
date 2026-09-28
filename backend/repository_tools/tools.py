@@ -76,14 +76,18 @@ class RepositoryToolLayer:
         start_line: int = 1,
         end_line: Optional[int] = None,
         context_lines: int = 0,
+        max_content_tokens: Optional[int] = None,
+        control_reservation_tokens: int = 60,
     ) -> Dict[str, Any]:
         """
         Reads a slice of a file from Azure Blob Storage.
         Requires analysis_id to be set. Constructs blob name from repo hash and path,
         fetches from blob storage, and returns specified line range.
         Supports optional context_lines to expand surrounding window.
+        Uses semantic truncation if max_content_tokens is provided.
         """
         from backend.storage import get_storage
+        from .truncation import truncate_semantically
 
         clean_path = path.replace("\\", "/").removeprefix("./").lstrip("/")
         storage = get_storage()
@@ -154,30 +158,25 @@ class RepositoryToolLayer:
                 s = max(1, s - context_lines)
                 e = min(total_lines, e + context_lines)
 
-            # Token-aware context protection:
-            # Conservative output-token budget for a single read_file observation (~1200 tokens ≈ 4800 chars).
-            # This ensures a single tool observation never consumes a large fraction of the token budget.
-            MAX_READ_OUTPUT_CHARS = 4800
+            requested_slice = lines[s - 1 : e]
 
-            # Calculate safe range line-by-line based on actual character/token estimate
-            accumulated_chars = 0
-            safe_end = s - 1
-            for idx in range(s - 1, e):
-                line_len = len(lines[idx]) + 7  # include line number prefix formatting (e.g. "  12 | ")
-                if accumulated_chars + line_len > MAX_READ_OUTPUT_CHARS and safe_end >= s:
-                    # Exceeds budget and we have at least one line
-                    break
-                accumulated_chars += line_len
-                safe_end = idx + 1
+            # Semantic truncation based on pre-calculated budget
+            # Default fallback: ~1200 tokens ≈ 4800 chars if not specified
+            budget_tokens = max_content_tokens if max_content_tokens and max_content_tokens > 0 else 1200
 
-            was_clamped = (safe_end < e)
-            actual_end = safe_end if was_clamped else e
+            selected_lines, count_taken, was_clamped = truncate_semantically(
+                lines=requested_slice,
+                max_tokens=budget_tokens,
+                file_path=clean_path,
+                reserved_control_tokens=control_reservation_tokens,
+            )
 
-            selected_lines = lines[s - 1 : actual_end]
+            actual_end = s + count_taken - 1
             numbered_content = "".join(f"{s + idx:4d} | {line}" for idx, line in enumerate(selected_lines))
 
-            if was_clamped:
+            if was_clamped and actual_end < e:
                 next_start = actual_end + 1
+                remaining_lines_count = e - actual_end
                 notice = (
                     f"\n\n[CONTEXT PROTECTION]\n"
                     f"Requested lines: {s}-{e}\n"
@@ -196,7 +195,9 @@ class RepositoryToolLayer:
                 "total_lines": total_lines,
                 "content": numbered_content,
                 "raw_text": "".join(selected_lines),
-                "is_truncated": was_clamped,
+                "is_truncated": was_clamped and (actual_end < e),
+                "next_start_line": actual_end + 1 if (was_clamped and actual_end < e) else None,
+                "remaining_lines": (e - actual_end) if (was_clamped and actual_end < e) else 0,
             }
 
         except FileNotFoundError:

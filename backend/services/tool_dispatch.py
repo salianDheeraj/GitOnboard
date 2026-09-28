@@ -238,7 +238,13 @@ class ToolDispatchTable:
 
         return base_tools
 
-    def dispatch(self, tool_name: str, arguments: Dict[str, Any]) -> ToolObservation:
+    def dispatch(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        max_content_tokens: Optional[int] = None,
+        control_reservation_tokens: int = 60,
+    ) -> ToolObservation:
         """
         Dispatch tool call to underlying implementation.
 
@@ -274,7 +280,12 @@ class ToolDispatchTable:
 
         try:
             if tool_name == "read_file":
-                return self._handle_read_file(arguments, tool_call_id)
+                return self._handle_read_file(
+                    arguments,
+                    tool_call_id,
+                    max_content_tokens=max_content_tokens,
+                    control_reservation_tokens=control_reservation_tokens,
+                )
             elif tool_name == "find_files":
                 return self._handle_find_files(arguments, tool_call_id)
             elif tool_name == "get_symbol":
@@ -309,7 +320,13 @@ class ToolDispatchTable:
                 error={"type": "dispatch_error", "message": str(e)},
             )
 
-    def _handle_read_file(self, arguments: Dict[str, Any], tool_call_id: str) -> ToolObservation:
+    def _handle_read_file(
+        self,
+        arguments: Dict[str, Any],
+        tool_call_id: str,
+        max_content_tokens: Optional[int] = None,
+        control_reservation_tokens: int = 60,
+    ) -> ToolObservation:
         """Handle read_file tool call."""
         path = arguments.get("path", "")
         start_line = arguments.get("start_line", 1)
@@ -323,7 +340,14 @@ class ToolDispatchTable:
             )
 
         try:
-            result = self.tool_layer.read_file(path, start_line, end_line, context_lines=context_lines)
+            result = self.tool_layer.read_file(
+                path,
+                start_line,
+                end_line,
+                context_lines=context_lines,
+                max_content_tokens=max_content_tokens,
+                control_reservation_tokens=control_reservation_tokens,
+            )
             # Check if result contains an error (file not found)
             if "error" in result:
                 return ToolObservation(
