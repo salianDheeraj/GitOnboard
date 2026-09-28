@@ -85,12 +85,37 @@ class Settings(BaseSettings):
     model_local_max_tokens: int = 8192
 
     # PROD mode models (Cloud providers: Gemini, OpenRouter, Groq)
-    # Use actual model names (e.g., "gemini-2.0-flash", "gpt-4-turbo", "openai/gpt-oss-120b")
-    model_prod_default: str = "gemini-2.0-flash"
-    gemini_model: str = "gemini-2.0-flash"
-    openrouter_model: str = "gpt-4-turbo"
+    # Use actual model names (e.g., "gemini-3.8-flash", "nvidia/nemotron-3-ultra-550b-a55b:free", "openai/gpt-oss-120b")
+    model_prod_default: str = "gemini-3.8-flash"
+    gemini_model: str = "gemini-3.8-flash"
+    openrouter_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     groq_model: str = "openai/gpt-oss-120b"
     model_prod_max_tokens: int = 65536
+
+    # Provider Context & Token Budget Settings (Configurable Application Defaults)
+    # Groq (openai/gpt-oss-120b)
+    groq_context_window: int = 65536
+    groq_input_tpm: int = 8000
+    groq_single_request_limit: int = 8000
+    groq_safety_margin_tokens: int = 600
+    groq_control_reservation_tokens: int = 150
+    groq_output_reservation_tokens: int = 1024
+
+    # Gemini (gemini-3.8-flash)
+    gemini_context_window: int = 1048576
+    gemini_input_tpm: int = 250000
+    gemini_single_request_limit: int = 65536  # Application ceiling, decoupled from 250K TPM
+    gemini_safety_margin_tokens: int = 2000
+    gemini_control_reservation_tokens: int = 200
+    gemini_output_reservation_tokens: int = 4096
+
+    # OpenRouter (nvidia/nemotron-3-ultra-550b-a55b:free or configured model)
+    openrouter_context_window: int = 1000000
+    openrouter_input_tpm: int = 0  # 0 indicates not tracked/unconstrained
+    openrouter_single_request_limit: int = 0  # 0 indicates not clamped by a fixed provider ceiling
+    openrouter_safety_margin_tokens: int = 1500
+    openrouter_control_reservation_tokens: int = 200
+    openrouter_output_reservation_tokens: int = 2048
 
     class Config:
         env_file = ".env"
