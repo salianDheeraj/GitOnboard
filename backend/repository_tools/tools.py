@@ -641,205 +641,28 @@ class RepositoryToolLayer:
         return results
 
     # ──────────────────────────────────────────────────────────────────────────
-    # 4. get_symbol & get_file_outline
+    # 5. Symbol & Call Graph Queries
     # ──────────────────────────────────────────────────────────────────────────
 
     def get_symbol(self, name: str) -> List[Dict[str, Any]]:
-        """
-        Looks up symbol definitions (functions, classes, methods) in the Fact Store.
-        """
-        if not self.db or not self.analysis_id:
-            return []
-
-        symbols = (
-            self.db.query(FactSymbol, FactFile.path)
-            .join(FactFile, FactSymbol.file_id == FactFile.id)
-            .filter(
-                FactSymbol.analysis_id == self.analysis_id,
-                FactSymbol.name.ilike(f"%{name}%"),
-            )
-            .limit(20)
-            .all()
-        )
-
-        return [
-            {
-                "symbol_id": sym.id,
-                "name": sym.name,
-                "qualified_name": sym.qualified_name,
-                "symbol_type": sym.symbol_type,
-                "file": path,
-                "line_start": sym.line_start,
-                "line_end": sym.line_end,
-            }
-            for sym, path in symbols
-        ]
+        from .symbol_ops import get_symbol_ops
+        return get_symbol_ops(self.db, self.analysis_id, name)
 
     def get_file_outline(self, path: str) -> Dict[str, Any]:
-        """
-        Returns an outline of symbols (classes, functions, routes) in a file.
-        """
-        if not self.db or not self.analysis_id:
-            return {"file": path, "symbols": []}
-
-        symbols = (
-            self.db.query(FactSymbol)
-            .join(FactFile, FactSymbol.file_id == FactFile.id)
-            .filter(
-                FactSymbol.analysis_id == self.analysis_id,
-                FactFile.path == path,
-            )
-            .order_by(FactSymbol.line_start)
-            .all()
-        )
-
-        return {
-            "file": path,
-            "symbols": [
-                {
-                    "name": sym.name,
-                    "type": sym.symbol_type,
-                    "line_start": sym.line_start,
-                    "line_end": sym.line_end,
-                }
-                for sym in symbols
-            ],
-        }
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # 5. Call graph: get_callers & get_callees
-    # ──────────────────────────────────────────────────────────────────────────
+        from .symbol_ops import get_file_outline_ops
+        return get_file_outline_ops(self.db, self.analysis_id, path)
 
     def get_callers(self, symbol_name: str) -> List[Dict[str, Any]]:
-        """Finds symbols that invoke or call the given symbol."""
-        if not self.db or not self.analysis_id:
-            return []
-
-        # First, find the target symbol ID
-        target_symbol = (
-            self.db.query(FactSymbol.id)
-            .filter(
-                FactSymbol.analysis_id == self.analysis_id,
-                FactSymbol.name.ilike(f"%{symbol_name}%"),
-            )
-            .first()
-        )
-
-        if not target_symbol:
-            return []
-
-        target_id = target_symbol.id
-
-        # Find all symbols that call this target
-        rel_rows = (
-            self.db.query(FactRelationship, FactSymbol.name, FactSymbol.symbol_type)
-            .join(FactSymbol, FactRelationship.from_symbol_id == FactSymbol.id)
-            .filter(
-                FactRelationship.analysis_id == self.analysis_id,
-                FactRelationship.rel_type == "CALLS",
-                FactRelationship.to_symbol_id == target_id,
-            )
-            .limit(20)
-            .all()
-        )
-
-        results = []
-        for rel, name, sym_type in rel_rows:
-            item = {
-                "caller_symbol": name,
-                "symbol_type": sym_type,
-                "relationship": rel.rel_type,
-            }
-            if rel.evidence_line is not None:
-                item["evidence_line"] = rel.evidence_line
-            if rel.evidence_snippet is not None:
-                item["snippet"] = rel.evidence_snippet
-            results.append(item)
-        return results
+        from .symbol_ops import get_callers_ops
+        return get_callers_ops(self.db, self.analysis_id, symbol_name)
 
     def get_callees(self, symbol_name: str) -> List[Dict[str, Any]]:
-        """Finds symbols that are called by the given symbol."""
-        if not self.db or not self.analysis_id:
-            return []
-
-        # First, find the source symbol ID
-        source_symbol = (
-            self.db.query(FactSymbol.id)
-            .filter(
-                FactSymbol.analysis_id == self.analysis_id,
-                FactSymbol.name.ilike(f"%{symbol_name}%"),
-            )
-            .first()
-        )
-
-        if not source_symbol:
-            return []
-
-        source_id = source_symbol.id
-
-        rel_rows = (
-            self.db.query(FactRelationship, FactSymbol.name, FactSymbol.symbol_type)
-            .join(FactSymbol, FactRelationship.to_symbol_id == FactSymbol.id)
-            .filter(
-                FactRelationship.analysis_id == self.analysis_id,
-                FactRelationship.rel_type == "CALLS",
-                FactRelationship.from_symbol_id == source_id,
-            )
-            .limit(20)
-            .all()
-        )
-
-        results = []
-        for rel, name, sym_type in rel_rows:
-            item = {
-                "callee_symbol": name,
-                "symbol_type": sym_type,
-                "relationship": rel.rel_type,
-            }
-            if rel.evidence_line is not None:
-                item["evidence_line"] = rel.evidence_line
-            if rel.evidence_snippet is not None:
-                item["snippet"] = rel.evidence_snippet
-            results.append(item)
-        return results
+        from .symbol_ops import get_callees_ops
+        return get_callees_ops(self.db, self.analysis_id, symbol_name)
 
     def get_related_files(self, path: str) -> List[Dict[str, Any]]:
-        """Finds files related via imports or function calls."""
-        if not self.db or not self.analysis_id:
-            return []
-
-        # Find symbol IDs in this file
-        file_syms = (
-            self.db.query(FactSymbol.id)
-            .join(FactFile, FactSymbol.file_id == FactFile.id)
-            .filter(FactSymbol.analysis_id == self.analysis_id, FactFile.path == path)
-            .all()
-        )
-        sym_ids = [s[0] for s in file_syms]
-        if not sym_ids:
-            return []
-
-        related_rows = (
-            self.db.query(FactRelationship, FactFile.path)
-            .join(FactSymbol, FactRelationship.to_symbol_id == FactSymbol.id)
-            .join(FactFile, FactSymbol.file_id == FactFile.id)
-            .filter(
-                FactRelationship.analysis_id == self.analysis_id,
-                FactRelationship.from_symbol_id.in_(sym_ids),
-                FactFile.path != path,
-            )
-            .limit(15)
-            .all()
-        )
-
-        return [
-            {
-                "related_file": r_path,
-                "rel_type": rel.rel_type,
-                "evidence": rel.evidence_snippet,
-            }
-            for rel, r_path in related_rows
-        ]
+        from .symbol_ops import get_related_files_ops
+        return get_related_files_ops(self.db, self.analysis_id, path)
 
     # ──────────────────────────────────────────────────────────────────────────
     # 6. Hybrid search_repository
@@ -856,144 +679,9 @@ class RepositoryToolLayer:
         return self._retriever
 
     def search_repository(self, query: str, limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
-        """
-        Hybrid search using HybridRetriever with comma-separated multi-query batching.
-        Supports: "mysql,db,connection,database" → splits into 3 queries, dedupes results.
-        Pagination: use offset to fetch next batch (e.g., offset=30 to get results 31-60).
-        Returns: [{"type", "file", "symbol"/"line", "lines"/"snippet", "query", "match_source", "score"}]
-        """
-        # Convert string parameters to integers if needed (from LLM tool calls)
-        try:
-            limit = int(limit) if limit else 10
-            offset = int(offset) if offset else 0
-        except (ValueError, TypeError):
-            limit = 10
-            offset = 0
-
-        retriever = self._get_retriever()
-        if retriever is None:
-            # Fallback to original multi-method approach if retriever unavailable
-            return self._search_repository_fallback(query, limit, offset)
-
-        # Split query on commas (supports comma-separated multi-query batching)
-        sub_queries = [q.strip() for q in query.split(",") if q.strip()]
-        if not sub_queries:
-            return []
-
-        combined: List[Dict[str, Any]] = []
-        seen_keys = set()
-        max_total = min(limit * len(sub_queries), 30)  # hard cap at 30 results
-
-        for sub_query in sub_queries:
-            try:
-                # Use HybridRetriever for better ranking
-                top_k = max(limit, 10)
-                results = retriever.retrieve(sub_query, top_k=top_k)
-
-                for result in results:
-                    # Map RetrieverResult to output dict shape
-                    if result.symbol:
-                        key = f"sym:{result.file_path}:{result.symbol}"
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            combined.append({
-                                "type": "symbol",
-                                "file": result.file_path,
-                                "symbol": result.symbol,
-                                "lines": f"{result.line_start}-{result.line_end}" if result.line_start else "",
-                                "query": sub_query,
-                                "match_source": result.score_type or "symbol_index",
-                                "score": result.score,
-                            })
-                    else:
-                        key = f"code:{result.file_path}:{result.line_number}"
-                        if key not in seen_keys:
-                            seen_keys.add(key)
-                            combined.append({
-                                "type": "code",
-                                "file": result.file_path,
-                                "line": result.line_number,
-                                "snippet": result.snippet or "",
-                                "query": sub_query,
-                                "match_source": result.score_type or "hybrid",
-                                "score": result.score,
-                            })
-            except Exception as e:
-                logger.debug(f"Error retrieving for query '{sub_query}': {e}")
-                continue
-
-        # If HybridRetriever returned no results, fall back to basic search methods
-        if not combined:
-            logger.debug(f"HybridRetriever returned 0 results, falling back to basic search for queries: {sub_queries}")
-            return self._search_repository_fallback(query, limit, offset)
-
-        # Apply offset-based pagination
-        start = offset
-        end = offset + max_total
-        return combined[start:end]
+        from .search_ops import search_repository_ops
+        return search_repository_ops(self, query, limit, offset)
 
     def _search_repository_fallback(self, query: str, limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
-        """Fallback to original multi-method search when HybridRetriever is unavailable."""
-        combined: List[Dict[str, Any]] = []
-        seen_keys = set()
-
-        # Split query on commas to support multi-query batching in fallback
-        sub_queries = [q.strip() for q in query.split(",") if q.strip()]
-        if not sub_queries:
-            return []
-
-        max_total = min(limit * len(sub_queries), 30)
-
-        for sub_query in sub_queries:
-            # 1. Symbol search
-            sym_matches = self.get_symbol(sub_query)
-            for sym in sym_matches[:5]:
-                key = f"sym:{sym['file']}:{sym['name']}"
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    combined.append({
-                        "type": "symbol",
-                        "file": sym["file"],
-                        "symbol": sym["name"],
-                        "symbol_type": sym["symbol_type"],
-                        "lines": f"{sym['line_start']}-{sym['line_end']}",
-                        "query": sub_query,
-                        "match_source": "symbol_index",
-                        "score": 0,
-                    })
-
-            # 2. File path match
-            file_matches = self.find_files(f"*{sub_query}*")
-            for f in file_matches[:5]:
-                key = f"file:{f['path']}"
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    combined.append({
-                        "type": "file",
-                        "file": f["path"],
-                        "size": f.get("size", 0),
-                        "query": sub_query,
-                        "match_source": "filename_manifest",
-                        "score": 0,
-                    })
-
-            # 3. Lexical search in source files
-            lex_matches = self.search_code(sub_query, max_matches=5)
-            for lex in lex_matches:
-                key = f"lex:{lex['file']}:{lex['line']}"
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    combined.append({
-                        "type": "code",
-                        "file": lex["file"],
-                        "line": lex["line"],
-                        "snippet": lex["snippet"],
-                        "query": sub_query,
-                        "match_source": "lexical",
-                        "score": 0,
-                    })
-
-        # Apply offset-based pagination
-        start = offset
-        end = offset + max_total
-        return combined[start:end]
+        from .search_ops import search_repository_fallback_ops
+        return search_repository_fallback_ops(self, query, limit, offset)
