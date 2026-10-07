@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy.orm import Session
 
+from backend.intelligence.notebook import resolve_source_document
 from backend.intelligence.retrieval.retriever import HybridRetriever
 from backend.models.fact_store import FactFile
-from backend.notebook_support import convert_notebook_to_source
 from backend.storage import get_storage
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def search_code_ops(
                         raw_content = f.read()
 
                     if file.endswith(".ipynb"):
-                        doc = convert_notebook_to_source(raw_content, rel_path)
+                        doc = resolve_source_document(rel_path, raw_content)
                         text = doc.source if not doc.conversion_error else raw_content
                     else:
                         text = raw_content
@@ -142,7 +142,7 @@ def search_code_ops(
             if not raw_text:
                 continue
 
-            doc = convert_notebook_to_source(raw_text, f_rec.path)
+            doc = resolve_source_document(f_rec.path, raw_text)
             text = doc.source if not doc.conversion_error else raw_text
 
             matches_in_file = 0
