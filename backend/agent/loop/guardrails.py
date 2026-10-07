@@ -30,6 +30,76 @@ COMMAND_TOOL_NAMES = {
 }
 
 
+class AgentState:
+    """
+    Deterministic Agent State tracker maintaining structured execution facts.
+    """
+    def __init__(self):
+        self.completed_tools: List[Dict[str, Any]] = []
+        self.successful_evidence: List[Dict[str, Any]] = []
+        self.failed_tools: List[Dict[str, Any]] = []
+        self.duplicate_attempts: List[Dict[str, Any]] = []
+        self.evidence_sufficient: bool = False
+        self.answer_ready: bool = False
+
+    def record_tool_result(self, tool_name: str, arguments: Dict[str, Any], success: bool, data: Any = None, error: Any = None, turn_index: int = 0):
+        entry = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "success": success,
+            "turn_index": turn_index,
+        }
+        self.completed_tools.append(entry)
+        if success:
+            evidence_summary = self._summarize_data(tool_name, data)
+            self.successful_evidence.append({
+                "tool_name": tool_name,
+                "summary": evidence_summary,
+                "turn_index": turn_index,
+                "data": data,
+            })
+        else:
+            self.failed_tools.append({
+                "tool_name": tool_name,
+                "error": error,
+                "turn_index": turn_index,
+            })
+
+    def record_duplicate(self, tool_name: str, arguments: Dict[str, Any], turn_index: int):
+        self.duplicate_attempts.append({
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "turn_index": turn_index,
+        })
+
+    def _summarize_data(self, tool_name: str, data: Any) -> str:
+        if isinstance(data, dict):
+            if data.get("found"):
+                rel = data.get("related", [])
+                target = data.get("target", {}).get("name", "")
+                return f"Found {len(rel)} relationships for '{target}'"
+            if data.get("path"):
+                return f"Inspected file '{data.get('path')}' ({data.get('start_line', 1)}-{data.get('end_line', '?')})"
+        elif isinstance(data, list):
+            return f"Found {len(data)} results"
+        return "Observed evidence"
+
+    def get_compact_summary(self) -> str:
+        """Generates a small, deterministic current-state summary for each turn."""
+        lines = ["[AGENT CURRENT STATE]"]
+        lines.append(f"- Completed tool steps: {len(self.completed_tools)}")
+        if self.successful_evidence:
+            ev_summaries = [f"{e['tool_name']}: {e['summary']}" for e in self.successful_evidence[-3:]]
+            lines.append(f"- Key evidence: {'; '.join(ev_summaries)}")
+        if self.failed_tools:
+            lines.append(f"- Failed tools: {len(self.failed_tools)}")
+        if self.duplicate_attempts:
+            lines.append(f"- Duplicate calls blocked: {len(self.duplicate_attempts)}")
+        status = "READY FOR FINAL ANSWER" if (self.evidence_sufficient or self.answer_ready) else "GATHERING EVIDENCE"
+        lines.append(f"- Status: {status}")
+        return "\n".join(lines)
+
+
 class LoopGuardrails:
     """
     Stateful execution monitor enforcing hard safety limits and loop detection.
@@ -44,6 +114,8 @@ class LoopGuardrails:
         self.recent_signatures: List[str] = []
         # Session-wide history tracking: sig -> dict with call count, last_success, last_data, error
         self.executed_tools: Dict[str, Dict[str, Any]] = {}
+        # Deterministic Agent State tracker
+        self.state = AgentState()
 
     @staticmethod
     def normalize_arguments(arguments: Any) -> str:
@@ -71,10 +143,19 @@ class LoopGuardrails:
         norm_args = self.normalize_arguments(arguments)
         return f"{tool_name}:{norm_args}"
 
-    def is_duplicate_call(self, tool_name: str, arguments: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    def is_duplicate_call(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        is_evidence_sufficient: bool = False,
+    ) -> Tuple[bool, Optional[str]]:
         """
         Checks if the tool call with identical normalized arguments has already been executed
         in the current QA session and returned a successful, non-empty result.
+
+        State-aware recovery:
+        - If evidence is sufficient -> instructs model to synthesize the final answer immediately.
+        - If evidence is insufficient -> instructs model specifically on missing path / alternatives.
 
         Returns:
             Tuple[bool, Optional[str]]:
@@ -98,12 +179,22 @@ class LoopGuardrails:
             return False, None
 
         first_turn = record.get("turn_index", "earlier")
-        feedback = (
-            f"[DUPLICATE TOOL CALL] You already called '{tool_name}' with these exact arguments in Turn {first_turn}, "
-            f"and the result is already available in your conversation history. "
-            f"Do not repeat identical calls. Please use the existing findings above, investigate a different path, "
-            f"or synthesize your final answer."
-        )
+        self.state.record_duplicate(tool_name, arguments, self.turn_count)
+
+        if is_evidence_sufficient or self.state.evidence_sufficient or self.state.answer_ready:
+            feedback = (
+                f"[DUPLICATE TOOL CALL - EVIDENCE SUFFICIENT] You already called '{tool_name}' with these exact arguments in Turn {first_turn}, "
+                f"and sufficient evidence to answer the question is already in your conversation history. "
+                f"Do not call any more tools. Provide your final answer immediately using: "
+                f'{{"action": "final_answer", "answer": "..."}}'
+            )
+        else:
+            feedback = (
+                f"[DUPLICATE TOOL CALL] You already called '{tool_name}' with these exact arguments in Turn {first_turn}, "
+                f"and the result is already available in your conversation history. "
+                f"Do not repeat identical calls. If you need implementation details, call read_file on the discovered file and line range; "
+                f"if looking for another symbol, search a different term; otherwise synthesize your final answer."
+            )
         return True, feedback
 
     def record_tool_result(
@@ -119,15 +210,24 @@ class LoopGuardrails:
         Records the outcome of a tool execution for session-wide duplicate detection.
         """
         sig = self.get_tool_signature(tool_name, arguments)
+        turn_idx = turn_index if turn_index is not None else self.turn_count
         self.executed_tools[sig] = {
             "tool_name": tool_name,
             "arguments": arguments,
             "success": success,
             "data": data,
             "error": error,
-            "turn_index": turn_index if turn_index is not None else self.turn_count,
+            "turn_index": turn_idx,
             "call_count": self.executed_tools.get(sig, {}).get("call_count", 0) + 1,
         }
+        self.state.record_tool_result(
+            tool_name=tool_name,
+            arguments=arguments,
+            success=success,
+            data=data,
+            error=error,
+            turn_index=turn_idx,
+        )
 
     def record_turn(self) -> None:
         """Records the progression of an agent turn."""

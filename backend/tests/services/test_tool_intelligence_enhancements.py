@@ -54,7 +54,7 @@ class TestToolSpecWhitelisting:
         names = [s.name for s in specs]
 
         # Must match exact intended 6 tools
-        expected_tools = ["read_file", "search_repository", "get_tree", "get_file_outline", "search_code", "query_rim"]
+        expected_tools = ["read_file", "search_repository", "get_tree", "get_file_outline", "search_code", "get_code_relationships"]
         assert sorted(names) == sorted(expected_tools)
 
         # Removed LLM-facing tools
@@ -257,3 +257,60 @@ class TestQueryRimSemanticsAndResolution:
             limit=50,
             target_raw_name="func",
         )
+
+    def test_get_code_relationships_rim_dispatch_and_catalog(self):
+        """Verify get_code_relationships is accepted in RIM mode and query_rim is hidden from LLM specs."""
+        tool_layer = MagicMock()
+        traverser = MagicMock(spec=FactStoreGraphTraverser)
+        resolver = MagicMock(spec=TargetEntityResolver)
+        dispatch = ToolDispatchTable(tool_layer, traverser, resolver)
+
+        # 1. LLM-facing tool catalog verification: only get_code_relationships, never query_rim
+        specs = dispatch.specs(include_rim=True)
+        tool_names = [s.name for s in specs]
+        assert "get_code_relationships" in tool_names
+        assert "query_rim" not in tool_names
+
+        # 2. Dispatch accepts get_code_relationships in RIM mode
+        mock_target = FactSymbol(id="1:sym1", analysis_id=1, name="authenticateToken", symbol_type="function")
+        resolver.resolve.return_value = mock_target
+        traverser.traverse_bounded.return_value = RelationshipTraversalResult(
+            query_class=SemanticQueryClass.CALLS_REVERSE,
+            direction=TraversalDirection.REVERSE,
+            target_entity=mock_target,
+            target_display_name="authenticateToken",
+            target_type="function",
+            related_entities=[],
+            resolution="NO_STATIC_EDGE_FOUND",
+        )
+
+        obs = dispatch.dispatch(
+            "get_code_relationships",
+            {
+                "entity_name": "authenticateToken",
+                "relationship_type": "CALLS",
+                "direction": "REVERSE",
+                "scope": "LOCAL",
+            },
+        )
+        assert obs.success is True
+        assert obs.tool_name == "get_code_relationships"
+        assert obs.data["resolution"] == "NO_STATIC_EDGE_FOUND"
+        assert obs.data["found"] is False
+        assert "fallback" in obs.data
+        traverser.traverse_bounded.assert_called_with(
+            target=mock_target,
+            relationship_type="CALLS",
+            direction="REVERSE",
+            scope="LOCAL",
+            depth=1,
+            limit=15,
+            target_raw_name="authenticateToken",
+        )
+
+        # 3. Baseline mode rejects get_code_relationships
+        baseline_dispatch = ToolDispatchTable(tool_layer, graph_traverser=None, target_resolver=None)
+        baseline_obs = baseline_dispatch.dispatch("get_code_relationships", {"entity_name": "authenticateToken"})
+        assert baseline_obs.success is False
+        assert baseline_obs.error["type"] == "tool_not_allowed"
+

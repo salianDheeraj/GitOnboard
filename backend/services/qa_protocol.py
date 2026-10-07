@@ -109,11 +109,20 @@ class QAProtocolAdapter:
   - RECOMMENDED for large files (>200 lines) before calling read_file to identify exact symbol line ranges.
   - Avoids reading unnecessary code by giving you line-bounded anchors first.""",
 
-        "query_rim": """**query_rim**: Bounded graph investigation tool for structural relationships (CALLS, IMPORTS, INHERITS, CONTAINS, ROUTE_HANDLER, DATABASE_ACCESS, GENERIC).
-  - Use when the question asks about callers, callees, dependencies, imports, inheritance, route handlers, or database table access.
+        "get_code_relationships": """**get_code_relationships**: Bounded graph investigation tool for structural relationships (CALLS, IMPORTS, INHERITS, CONTAINS, ROUTE_HANDLER, DATABASE_ACCESS, GENERIC).
+  - Use when the question asks about:
+    * callers / callees ("Who calls X?", "What does X call?")
+    * imports / imported-by ("What does Y import?", "What imports Y?")
+    * inheritance ("What extends X?", "What classes subclass Y?")
+    * dependencies / components ("What depends on module M?")
+    * route handlers and database table access ("What queries table T?")
+  - Do NOT use for:
+    * exact text, string literals, or comments (use `search_code`)
+    * configuration files (Dockerfiles, YAML, JSON, .env) (use `search_code`)
+    * locating a file by path or general symbol definition (use `search_repository`)
   - Use scope='LOCAL' (default, 1 hop) for direct callers/callees.
   - Use scope='NEIGHBORHOOD' (depth 1-3) for multi-hop tracing across components.
-  - If query_rim returns NO_STATIC_EDGE_FOUND, do NOT assume the relationship does not exist; dynamic JS/TS execution or callbacks may exist. Follow the suggested fallback (search_repository) to inspect the implementation.""",
+  - If get_code_relationships returns NO_STATIC_EDGE_FOUND, do NOT assume the relationship does not exist; dynamic JS/TS execution or callbacks may exist. Follow the suggested fallback (search_repository) to inspect the implementation.""",
 
         "read_file": """**read_file**: Authoritative tool for inspecting actual code implementation and verifying behavior.
   - Primary tool for understanding HOW something works.
@@ -143,19 +152,31 @@ Do NOT assume any specific framework (e.g., FastAPI, Django, Spring), database, 
 ### INTENT-BASED TOOL SELECTION
 
 Select tools based on what evidence you need rather than following a rigid predetermined sequence:
-- **Repository orientation & architecture overview**: Call `get_tree` to discover structure.
-- **Finding symbols, definitions, & files**: Call `search_repository`.
-- **Exact text, regex patterns, & configs (YAML, JSON, Docker)**: Call `search_code`.
-- **Large-file navigation (>200 lines)**: Call `get_file_outline` to locate symbol line boundaries before reading.
-- **Relationships, callers, callees, dependencies, & execution flow**: Call `query_rim` (LOCAL for 1-hop, NEIGHBORHOOD for multi-hop tracing).
-- **Implementation verification**: Call `read_file` with targeted `start_line` and `end_line` (plus optional `context_lines`).
 
-Use the smallest set of tools that provides sufficient evidence. Do not call extra tools merely to appear thorough.
+1. **Graph-First Intent (Prioritize `get_code_relationships`)**:
+   When the question is fundamentally relational, dependency-oriented, hierarchy-oriented, or graph-oriented, prioritize `get_code_relationships` before falling back to lexical search:
+   - Callers / callees ("Who calls X?", "What calls this function?", "What does func Y call?")
+   - Imports / imported-by ("What does Y import?", "What imports Y?")
+   - Dependencies / dependents ("What depends on X?", "What does X depend on?", "What uses X?")
+   - Inheritance / subclasses / superclass ("Where is this class inherited?", "What extends X?")
+   - Route relationships ("Which routes use Z?", "What handles route R?")
+   - Database/table access relationships ("What queries table T?")
+   - Call graphs and structural execution flow (use `scope='LOCAL'` for 1-hop, `scope='NEIGHBORHOOD'` for multi-hop tracing).
+
+2. **File/Search-First Intent (Prioritize search/navigation tools)**:
+   When the question seeks definitions, exact strings, configs, or general repository orientation:
+   - Repository orientation & architecture overview: Call `get_tree` to discover structure.
+   - Finding symbols, definitions, & files ("find the implementation of...", "where is function F defined"): Call `search_repository`.
+   - Exact text, regex patterns, & configs (YAML, JSON, Docker, environment variables, comments, string literals): Call `search_code`.
+   - Large-file navigation (>200 lines): Call `get_file_outline` to locate symbol line boundaries before reading.
+   - Implementation verification & reading source code: Call `read_file` with targeted `start_line` and `end_line` (plus optional `context_lines`).
+
+Use the smallest set of tools that provides sufficient evidence. Do not call extra tools merely to appear thorough. Do not force `get_code_relationships` for questions that only require finding a file, reading an implementation, or searching config/text.
 
 ### CODE INSPECTION & EVIDENCE MANDATE
-1. **Search tools and query_rim return pointers, metadata, and snippets**, NOT full implementations.
+1. **Search tools and get_code_relationships return pointers, metadata, and snippets**, NOT full implementations.
 2. **Authoritative Verification**: When you identify relevant files and lines (e.g. from search, file outline, or graph relationships), call `read_file` on that specific line range to inspect the actual implementation before concluding.
-3. **Graph Uncertainty & Dynamic Code**: `query_rim` operates on static analysis. If `query_rim` returns `NO_STATIC_EDGE_FOUND`, it means no static edge was found in the graph. It does NOT mean "the relationship definitely does not exist." Dynamic JavaScript/TypeScript constructs (callbacks, arrow functions, middleware pipelines, dynamic imports) may still connect them. Follow the suggested fallback (`search_repository` -> `read_file`) to verify.
+3. **Graph Uncertainty & Dynamic Code**: `get_code_relationships` operates on static analysis. If `get_code_relationships` returns `NO_STATIC_EDGE_FOUND`, it means no static edge was found in the graph. It does NOT mean "the relationship definitely does not exist." Dynamic JavaScript/TypeScript constructs (callbacks, arrow functions, middleware pipelines, dynamic imports) may still connect them. Follow the suggested fallback (`search_repository` -> `read_file`) to verify.
 4. **Negative and Absence Claims**: Claims that something is missing, incomplete, or absent (e.g. "There is no vector database" or "authenticate is not called") require thorough search evidence across relevant directories before concluding absence.
 5. **Notebooks are Code**: In data science, machine learning, and AI repositories, `.ipynb` files contain first-class code. Treat them as full code files.
 
@@ -391,8 +412,8 @@ Repository Intelligence Graph facts (structural relationships):
 
 {rim_metadata_block}
 
-**WHEN TO USE QUERY_RIM:**
-Use `query_rim` when the question involves relationships, callers/callees, dependencies, or connections between repository entities:
+**WHEN TO USE GET_CODE_RELATIONSHIPS:**
+Use `get_code_relationships` when the question involves relationships, callers/callees, dependencies, or connections between repository entities:
 - CALLS: functions called by or calling an entity
 - IMPORTS: module dependencies (incoming and outgoing)
 - INHERITS: class inheritance and base classes
@@ -400,9 +421,11 @@ Use `query_rim` when the question involves relationships, callers/callees, depen
 - ROUTE_HANDLER: route handlers mapped to HTTP endpoints
 - DATABASE_ACCESS: database tables or models accessed by code
 
+Do NOT use for exact text, comments, configuration files (Docker, YAML, JSON), or string literals. Use `search_code` instead.
+
 Use scope='LOCAL' for direct 1-hop relationships, 'NEIGHBORHOOD' (depth 1-3) for multi-hop tracing, and 'GLOBAL' when repository-wide relationship inspection is required.
 
-If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use search_repository and read_file to inspect the implementation directly."""
+If get_code_relationships returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use search_repository and read_file to inspect the implementation directly."""
         else:
             rim_section = ""  # baseline gets no RIM section at all
 
@@ -558,7 +581,7 @@ If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use sear
         # Regular tool call: extract parameters
         KNOWN_TOOLS = {
             "search_code", "search_repository", "get_file_outline",
-            "query_rim", "read_file", "get_tree"
+            "get_code_relationships", "query_rim", "read_file", "get_tree"
         }
 
         if invoke_name not in KNOWN_TOOLS:
@@ -628,6 +651,18 @@ If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use sear
                     continue
 
         if obj is None or not isinstance(obj, dict):
+            # Check if this is an answer-like plain text or markdown response before marking malformed
+            stripped_text = text.strip()
+            if stripped_text and not any(tag in stripped_text for tag in ["<tool_call>", "<function_call>"]):
+                # If text looks like a markdown or plain text answer (e.g. starts with Answer, #, or is a substantive response)
+                # and doesn't appear to be an unparsed JSON or code snippet proposing a tool
+                if not re.search(r'^\s*\{\s*"', stripped_text):
+                    logger.info(f"[_parse_json_response] Plain text / Markdown answer detected without JSON envelope. Wrapping as final_answer.")
+                    return {
+                        "action": "final_answer",
+                        "answer": stripped_text,
+                    }
+
             logger.debug(f"No valid JSON action object found in response: {text[:100]}")
             return {
                 "action": "malformed",
@@ -641,7 +676,7 @@ If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use sear
         # Pattern: {"action": "search_code", "arguments": {...}} should be tool_call
         KNOWN_TOOLS = {
             "search_code", "search_repository", "get_file_outline",
-            "query_rim", "read_file", "get_tree"
+            "get_code_relationships", "query_rim", "read_file", "get_tree"
         }
         if action in KNOWN_TOOLS and obj.get("arguments"):
             # LLM mistakenly used tool name as action. Correct it.
@@ -712,7 +747,7 @@ If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use sear
                 if action == "final_answer" and "answer" in parsed_json:
                     return str(parsed_json["answer"]).strip()
                 if action == "tool_call" or "tool_name" in parsed_json or action in {
-                    "read_file", "search_code", "search_repository", "get_file_outline", "query_rim", "get_tree"
+                    "read_file", "search_code", "search_repository", "get_file_outline", "get_code_relationships", "query_rim", "get_tree"
                 }:
                     # Response is strictly a tool call JSON with no synthesis text
                     return ""
@@ -737,14 +772,26 @@ If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use sear
                 if extracted:
                     return extracted
 
-        # 3. Strip any complete <tool_call>...</tool_call> blocks
+        # 3. Strip any complete <tool_call>...</tool_call> and <function_call>...</function_call> blocks
         cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', raw_trimmed, flags=re.DOTALL)
+        cleaned = re.sub(r'<function_call>.*?</function_call>', '', cleaned, flags=re.DOTALL)
 
-        # Also strip incomplete/truncated <tool_call> blocks (e.g., `<tool_call>...` until end of string)
+        # Also strip incomplete/truncated blocks until end of string
         cleaned = re.sub(r'<tool_call>.*$', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'<function_call>.*$', '', cleaned, flags=re.DOTALL)
+
+        # Strip [TOOL_CALL] blocks or prefixes
+        cleaned = re.sub(r'\[TOOL_CALL\].*?\[/TOOL_CALL\]', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'\[TOOL_CALL\].*$', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'\[TOOL_CALL\]', '', cleaned)
+
+        # Strip fenced tool_call code blocks (e.g. ```tool_call ... ``` or ```json with tool_call)
+        cleaned = re.sub(r'```(?:tool_call|json)?\s*\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)"[^{}]*\}\s*```', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'```tool_call\s*.*?```', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'```tool_call\s*.*$', '', cleaned, flags=re.DOTALL)
 
         # Strip orphan tags if any remain
-        cleaned = re.sub(r'</?tool_call>', '', cleaned)
+        cleaned = re.sub(r'</?(?:tool_call|function_call)>', '', cleaned)
         cleaned = re.sub(r'<invoke[^>]*>.*?</invoke>', '', cleaned, flags=re.DOTALL)
         cleaned = re.sub(r'<invoke[^>]*>.*$', '', cleaned, flags=re.DOTALL)
         cleaned = re.sub(r'</?invoke[^>]*>', '', cleaned)
@@ -753,11 +800,16 @@ If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use sear
         cleaned = re.sub(r'</?parameter[^>]*>', '', cleaned)
 
         # 4. Strip JSON tool calls if embedded in text (e.g., text preceding or following {"action": "tool_call", ...})
-        for match in re.finditer(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|query_rim|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
+        for match in re.finditer(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
+            cleaned = cleaned.replace(match.group(0), "")
+
+        # Also strip raw JSON tool call envelopes matching {"tool_name": "...", "arguments": {...}}
+        for match in re.finditer(r'\{[^{}]*"tool_name"\s*:\s*"(?:read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
             cleaned = cleaned.replace(match.group(0), "")
 
         # Also strip truncated JSON tool calls at the end of the response: e.g., '{"action": "tool_call", ...'
-        cleaned = re.sub(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|query_rim|get_tree)".*$', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)".*$', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'\{[^{}]*"tool_name"\s*:\s*"(?:read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)".*$', '', cleaned, flags=re.DOTALL)
 
         # Check for embedded JSON final_answer in markdown text: {"action": "final_answer", "answer": "..."}
         fa_json_match = re.search(r'\{[^{}]*"action"\s*:\s*"final_answer"\s*,\s*"answer"\s*:\s*"(.*?)"\s*\}', cleaned, re.DOTALL)

@@ -19,6 +19,11 @@ from backend.ai.service import LLMService
 from backend.ai.schemas import LLMRequest, Message, MessageRole, Tool
 from backend.ai.tokencount.registry import count_full_request
 from backend.config import settings
+from backend.agent.intent.semantic_query import (
+    classify_semantic_query,
+    SemanticQueryClass,
+    TraversalDirection,
+)
 from backend.services.qa_protocol import QAProtocolAdapter
 
 if TYPE_CHECKING:
@@ -347,7 +352,9 @@ class QALoop:
                 answer = self.protocol_adapter.parse_final_synthesis(turn.raw_model_output)
                 if not answer:
                     answer = turn.raw_model_output
-                result.answer = answer
+                # Run fact validation on pre-turn limit final answer and append caveats if needed
+                _, _, caveated = self._validate_final_answer_against_evidence(answer, result)
+                result.answer = caveated
                 break
 
             # 2. Call LLM with current conversation
@@ -362,9 +369,14 @@ class QALoop:
                 tool_specs = self.tool_dispatch.specs(include_rim=is_rim)
                 schema_tools = _tool_specs_to_schema_tools(tool_specs) if tool_specs else None
 
-                # Build draft request
+                # Build draft request with compact state summary
+                sys_text = self.system_prompt_parts.full_text
+                if turn_index > 0:
+                    state_summary = self.guardrails.state.get_compact_summary()
+                    sys_text = f"{sys_text}\n\n{state_summary}"
+
                 llm_messages = [
-                    Message(role=MessageRole.SYSTEM, content=self.system_prompt_parts.full_text),
+                    Message(role=MessageRole.SYSTEM, content=sys_text),
                 ]
                 for msg in messages:
                     try:
@@ -604,8 +616,84 @@ class QALoop:
                 tool_name = tool_call.get("tool_name", "")
                 arguments = tool_call.get("arguments", {})
 
-                # 5. Check duplicate tool call in current session
-                is_duplicate, duplicate_feedback = self.guardrails.is_duplicate_call(tool_name, arguments)
+                # 4b. Deterministic Relational Routing:
+                # If question has strong relational intent (e.g. who calls, what calls, who imports, what depends on,
+                # what inherits, call path, dependency chain) and LLM chooses lexical search (search_repository/search_code)
+                # in RIM mode, check if target symbol can be resolved and route to get_code_relationships first.
+                if (
+                    self.mode == "rim"
+                    and tool_name in ("search_repository", "search_code")
+                    and getattr(self.tool_dispatch, "target_resolver", None)
+                    and getattr(self.tool_dispatch, "graph_traverser", None)
+                ):
+                    rel_intent = classify_semantic_query(question)
+                    strong_rel_classes = (
+                        SemanticQueryClass.CALLS_REVERSE,
+                        SemanticQueryClass.CALLS_FORWARD,
+                        SemanticQueryClass.IMPORTS_REVERSE,
+                        SemanticQueryClass.IMPORTS_FORWARD,
+                        SemanticQueryClass.INHERITS_REVERSE,
+                        SemanticQueryClass.INHERITS_FORWARD,
+                        SemanticQueryClass.DATABASE_ACCESS,
+                    )
+                    if rel_intent.query_class in strong_rel_classes and rel_intent.target_raw_name:
+                        resolved_target = self.tool_dispatch.target_resolver.resolve(rel_intent.target_raw_name)
+                        # Also check if lexical search argument query itself matches a known symbol
+                        lexical_query = str(arguments.get("query", "")).strip()
+                        if not resolved_target and lexical_query:
+                            resolved_target = self.tool_dispatch.target_resolver.resolve(lexical_query)
+
+                        if resolved_target:
+                            # Map semantic query class to relationship_type and direction
+                            target_name = getattr(resolved_target, "name", None) or rel_intent.target_raw_name
+                            rel_type_map = {
+                                SemanticQueryClass.CALLS_REVERSE: ("CALLS", "REVERSE"),
+                                SemanticQueryClass.CALLS_FORWARD: ("CALLS", "FORWARD"),
+                                SemanticQueryClass.IMPORTS_REVERSE: ("IMPORTS", "REVERSE"),
+                                SemanticQueryClass.IMPORTS_FORWARD: ("IMPORTS", "FORWARD"),
+                                SemanticQueryClass.INHERITS_REVERSE: ("INHERITS", "REVERSE"),
+                                SemanticQueryClass.INHERITS_FORWARD: ("INHERITS", "FORWARD"),
+                                SemanticQueryClass.DATABASE_ACCESS: ("DATABASE_ACCESS", "REVERSE"),
+                            }
+                            mapped_rel, mapped_dir = rel_type_map.get(
+                                rel_intent.query_class, ("GENERIC", rel_intent.direction.value)
+                            )
+                            # Only reroute if get_code_relationships has not already been queried for this target & relationship
+                            already_queried = any(
+                                t.tool_call
+                                and t.tool_call.get("tool_name") in ("get_code_relationships", "query_rim")
+                                and str(t.tool_call.get("arguments", {}).get("entity_name", "")).lower() == target_name.lower()
+                                and str(t.tool_call.get("arguments", {}).get("relationship_type", "")).upper() == mapped_rel
+                                for t in result.turns
+                            )
+                            if not already_queried:
+                                logger.info(
+                                    f"[QALoop:RelationalRouting] Strong relational intent detected ({rel_intent.query_class.value}). "
+                                    f"Deterministically routing '{tool_name}' -> 'get_code_relationships' for entity '{target_name}'."
+                                )
+                                print(
+                                    f"[QALoop:RELATIONAL_ROUTING] turn={turn_index} rerouting {tool_name} → "
+                                    f"get_code_relationships(entity_name={target_name}, relationship_type={mapped_rel}, direction={mapped_dir})"
+                                )
+                                tool_name = "get_code_relationships"
+                                arguments = {
+                                    "entity_name": target_name,
+                                    "relationship_type": mapped_rel,
+                                    "direction": mapped_dir,
+                                    "scope": "LOCAL",
+                                    "depth": 1,
+                                    "limit": 15,
+                                }
+                                # Update tool_call dict so recording and observations reflect the routed tool
+                                tool_call["tool_name"] = tool_name
+                                tool_call["arguments"] = arguments
+
+                # 5. Check duplicate tool call in current session with state awareness
+                is_sufficient, _ = self.check_evidence_sufficiency(question, result)
+                self.guardrails.state.evidence_sufficient = is_sufficient
+                is_duplicate, duplicate_feedback = self.guardrails.is_duplicate_call(
+                    tool_name, arguments, is_evidence_sufficient=is_sufficient
+                )
                 if is_duplicate:
                     logger.warning(
                         f"[QALoop] Duplicate tool call detected at turn {turn_index}: {tool_name} with {arguments}"
@@ -645,6 +733,45 @@ class QALoop:
                         await self.on_turn(turn)
                     # Do not increment result.tool_call_count because execution was intercepted
                     continue
+
+                # 5b. Evidence-sufficiency stopping gate:
+                # If evidence is already sufficient and model still proposes another tool call,
+                # immediately transition to final answer synthesis to prevent endless exploration.
+                is_sufficient, suff_msg = self.check_evidence_sufficiency(question, result)
+                if is_sufficient:
+                    logger.info(
+                        f"[QALoop] Evidence sufficiency reached at turn {turn_index}; stopping retrieval and transitioning to final answer."
+                    )
+                    self.guardrails.state.evidence_sufficient = True
+                    self.guardrails.state.answer_ready = True
+                    messages.append({
+                        "role": "assistant",
+                        "content": llm_response.content,
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"{suff_msg or '[EVIDENCE SUFFICIENT]'}\n"
+                            "You have collected all necessary evidence to answer the question accurately. "
+                            "Do not make any further tool calls. Please synthesize and output your final answer now."
+                        ),
+                    })
+                    final_turn = await self._do_final_answer_turn(
+                        turn_index + 1, messages, llm_total_ms, tool_total_ms, loop_start
+                    )
+                    result.turns.append(turn)
+                    if self.on_turn:
+                        await self.on_turn(turn)
+                    result.turns.append(final_turn)
+                    if self.on_turn:
+                        await self.on_turn(final_turn)
+                    answer = self.protocol_adapter.parse_final_synthesis(final_turn.raw_model_output)
+                    if not answer:
+                        answer = final_turn.raw_model_output
+                    _, _, caveated = self._validate_final_answer_against_evidence(answer, result)
+                    result.answer = caveated
+                    result.stop_reason = StopReason.COMPLETED_FOR_VERIFICATION
+                    break
 
                 # 6. Check guardrails on tool call
                 stop_reason, should_warn = self.guardrails.record_tool_call(tool_name, arguments)
@@ -773,8 +900,8 @@ class QALoop:
                                     symbol_name = item["symbol_name"]
                                     if symbol_name and symbol_name not in result.symbols_searched:
                                         result.symbols_searched.append(symbol_name)
-                elif tool_name == "query_rim" and tool_observation.success:
-                    # Track RIM access from query_rim tool
+                elif tool_name in ("get_code_relationships", "query_rim") and tool_observation.success:
+                    # Track RIM access from get_code_relationships / query_rim tool
                     data = tool_observation.data or {}
                     if data.get("found"):
                         entity_name = arguments.get("entity_name", "")
@@ -809,9 +936,14 @@ class QALoop:
                     ]
                 messages.append(assistant_message)
 
+                obs_content = self._format_tool_observation(tool_name, tool_observation, sanitized_data)
+                is_sufficient, suff_msg = self.check_evidence_sufficiency(question, result)
+                if is_sufficient and suff_msg:
+                    obs_content += f"\n\n{suff_msg}"
+
                 messages.append({
                     "role": "user",
-                    "content": self._format_tool_observation(tool_name, tool_observation, sanitized_data),
+                    "content": obs_content,
                 })
 
                 # Record turn with tool info (include data and formatted message for later reconstruction)
@@ -1020,7 +1152,7 @@ class QALoop:
 
         Returns True if: search_repository, read_file, or get_symbol was called and succeeded.
         """
-        retrieval_tools = ["search_repository", "read_file", "get_symbol", "search_code"]
+        retrieval_tools = ["search_repository", "read_file", "get_symbol", "search_code", "get_code_relationships", "query_rim"]
 
         for turn in result.turns:
             if turn.tool_call:
@@ -1031,6 +1163,61 @@ class QALoop:
                         return True
 
         return False
+
+    def check_evidence_sufficiency(self, question: str, result: QALoopResult) -> Tuple[bool, Optional[str]]:
+        """
+        Evaluate whether the evidence collected so far is sufficient to answer the user's question,
+        enabling proactive early stopping and synthesis rather than exhausting execution turns.
+
+        Returns:
+            Tuple[is_sufficient, recommendation_message]
+        """
+        if not question or not result or len(result.turns) == 0:
+            return False, None
+
+        q_lower = question.lower()
+        successful_reads = [
+            t for t in result.turns
+            if t.tool_call and t.tool_call.get("tool_name") == "read_file"
+            and t.tool_observation and t.tool_observation.get("success")
+            and isinstance(t.tool_observation.get("data"), dict)
+            and len(str(t.tool_observation.get("data", {}).get("raw_text") or t.tool_observation.get("data", {}).get("content") or "")) > 40
+        ]
+        successful_graph = [
+            t for t in result.turns
+            if t.tool_call and t.tool_call.get("tool_name") in ("get_code_relationships", "query_rim")
+            and t.tool_observation and t.tool_observation.get("success")
+            and isinstance(t.tool_observation.get("data"), dict)
+            and t.tool_observation.get("data", {}).get("found")
+        ]
+
+        # Scenario 1: Relational question (caller / callee / imports) where get_code_relationships found relationship
+        is_relational_q = any(w in q_lower for w in ["who calls", "what calls", "caller", "callee", "depend", "import", "where is", "inherits", "what does"])
+        if is_relational_q and len(successful_graph) >= 1:
+            # If the graph found static confirmed callees/callers, we have sufficient evidence
+            # (either with or without subsequent read_file)
+            if len(successful_reads) >= 1:
+                return True, (
+                    "[EVIDENCE SUFFICIENT] Structural relationship and relevant code implementation have been inspected. "
+                    "You have sufficient evidence to provide your final answer now. Do not call additional tools."
+                )
+            # If graph has confirmed edges and question just asks who/what calls
+            first_graph = successful_graph[0].tool_observation.get("data", {})
+            if first_graph.get("resolution") == "STATIC_CONFIRMED" and len(first_graph.get("related", [])) > 0:
+                return True, (
+                    "[EVIDENCE SUFFICIENT] Structural relationships have been confirmed by code graph analysis. "
+                    "You have sufficient evidence to provide your final answer now. Do not call additional tools."
+                )
+
+        # Scenario 2: Functional question ("what does X do", "how does X work") where the target function/file has been read
+        is_functional_q = any(w in q_lower for w in ["what does", "how does", "explain", "how is", "where is", "definition of"])
+        if is_functional_q and len(successful_reads) >= 1:
+            return True, (
+                "[EVIDENCE SUFFICIENT] The target implementation has been inspected with read_file. "
+                "You have sufficient evidence to provide your final answer now. Do not call additional tools."
+            )
+
+        return False, None
 
     def _retrieval_evidence_supports_absence(self, result: QALoopResult, answer: str = "") -> Tuple[bool, str]:
         """
@@ -1049,7 +1236,7 @@ class QALoop:
         - If a search was executed with query 'Q' and returned 0 matches, that can support
           absence of 'Q' iff no other tool found 'Q' and the call was successful.
         """
-        retrieval_tools = ["search_repository", "read_file", "get_symbol", "search_code", "query_rim"]
+        retrieval_tools = ["search_repository", "read_file", "get_symbol", "search_code", "get_code_relationships", "query_rim"]
         found_positive_matches: List[str] = []
         had_successful_retrieval = False
         had_failed_search = False
@@ -1105,45 +1292,91 @@ class QALoop:
                 return False, "Failed or errored searches cannot be treated as proof of absence."
             return False, "No retrieval was performed to verify this absence claim."
 
-        # If positive evidence was retrieved that contradicts an absence claim
-        # E.g. answer says "no postgresql database" but read_file or search found postgresql
+        # Expanded dictionary of common architectural entities and their related keywords/aliases
+        suspicious_terms = [
+            ("postgres", ["postgres", "postgresql", "psycopg"]),
+            ("postgresql", ["postgres", "postgresql", "psycopg"]),
+            ("mysql", ["mysql", "pymysql"]),
+            ("sqlite", ["sqlite", "sqlite3"]),
+            ("redis", ["redis"]),
+            ("chroma", ["chroma", "chromadb"]),
+            ("qdrant", ["qdrant"]),
+            ("jwt", ["jwt", "pyjwt"]),
+            ("token", ["token", "tokens"]),
+            ("auth", ["auth", "authenticate", "authoriz"]),
+            ("session", ["session"]),
+            ("docker", ["docker", "dockerfile"]),
+            ("fastapi", ["fastapi"]),
+            ("router", ["router", "routing"]),
+            ("endpoint", ["endpoint", "endpoints"]),
+            ("celery", ["celery"]),
+            ("worker", ["worker"]),
+            ("queue", ["queue"]),
+            ("cache", ["cache"]),
+            ("blob", ["blob"]),
+            ("s3", ["s3", "boto3"]),
+            ("azure", ["azure"]),
+            ("websocket", ["websocket", "websockets", "ws"]),
+            ("cors", ["cors"]),
+            ("middleware", ["middleware"]),
+            ("graphql", ["graphql", "strawberry", "ariadne"]),
+            ("oauth", ["oauth", "oauth2"]),
+            ("migration", ["migration", "migrations", "alembic"]),
+            ("alembic", ["alembic"]),
+            ("prisma", ["prisma"]),
+        ]
+
+        # 1. Contradiction Check: If positive evidence was retrieved that contradicts an absence claim
         if found_positive_matches and answer_lower:
-            # Check if specific entities claimed absent were actually found in positive matches
-            # Common entities:
-            suspicious_terms = [
-                ("postgres", ["postgres", "postgresql", "psycopg"]),
-                ("postgresql", ["postgres", "postgresql", "psycopg"]),
-                ("mysql", ["mysql", "pymysql"]),
-                ("sqlite", ["sqlite", "sqlite3"]),
-                ("redis", ["redis"]),
-                ("chroma", ["chroma", "chromadb"]),
-                ("qdrant", ["qdrant"]),
-                ("jwt", ["jwt", "pyjwt"]),
-                ("token", ["token", "tokens"]),
-                ("auth", ["auth", "authenticate", "authoriz"]),
-                ("session", ["session"]),
-                ("docker", ["docker", "dockerfile"]),
-                ("fastapi", ["fastapi"]),
-                ("router", ["router", "routing"]),
-                ("endpoint", ["endpoint", "endpoints"]),
-                ("celery", ["celery"]),
-                ("worker", ["worker"]),
-                ("queue", ["queue"]),
-                ("cache", ["cache"]),
-                ("blob", ["blob"]),
-                ("s3", ["s3", "boto3"]),
-                ("azure", ["azure"]),
-            ]
             for term, aliases in suspicious_terms:
                 if term in answer_lower and any(neg in answer_lower for neg in ["no ", "not ", "does not", "doesn't", "without"]):
-                    # Model claims absence of term
-                    # Did we find this term or any of its known aliases in any positive tool observation?
+                    # Model claims absence of term - did positive observations contain it?
                     for turn in result.turns:
                         obs = turn.tool_observation or {}
                         if obs.get("success"):
                             data_str = str(obs.get("data", "")).lower()
                             if any(alias in data_str for alias in aliases):
                                 return False, f"Contradicted by evidence: repository search/read observed '{term}' in the codebase."
+
+        # 2. Targeted Query Relevance Check:
+        # Absence claims must be backed by searches relevant to the entity being claimed absent.
+        # An empty result from searching an unrelated term (e.g. search("foo") -> 0) does NOT justify claiming "Redis is absent".
+        if answer_lower:
+            # Find all suspicious terms that appear in negative context in the answer
+            claimed_absent = []
+            for term, aliases in suspicious_terms:
+                if term in answer_lower and any(neg in answer_lower for neg in ["no ", "not ", "does not", "doesn't", "without"]):
+                    claimed_absent.append((term, aliases))
+
+            if claimed_absent:
+                # Check whether ANY executed retrieval tool searched for ANY of the claimed absent entities/aliases
+                # If specific architectural terms (e.g., redis, postgres, celery) are claimed absent,
+                # but searches only targeted unrelated terms (e.g., "foo", "hello"), reject the absence claim.
+                searched_queries = []
+                for turn in result.turns:
+                    tc = turn.tool_call or {}
+                    obs = turn.tool_observation or {}
+                    if not obs.get("success"):
+                        continue
+                    args = tc.get("arguments", {})
+                    q_str = str(args.get("query") or args.get("name") or args.get("entity_name") or args.get("path") or "").lower()
+                    if q_str:
+                        searched_queries.append(q_str)
+
+                # Check for primary claimed entity:
+                # If answer claims "no Redis cache", and query was "redis", that matches!
+                has_relevant_search = False
+                for term, aliases in claimed_absent:
+                    for q in searched_queries:
+                        if any(alias in q for alias in aliases) or q in aliases or term in q:
+                            has_relevant_search = True
+                            break
+                    if has_relevant_search:
+                        break
+
+                if not has_relevant_search:
+                    terms_str = ", ".join(t[0] for t in claimed_absent[:3])
+                    return False, f"Absence claim for '{terms_str}' is unverified: searches performed in this session did not target '{terms_str}' or related identifiers."
 
         return True, "supported"
 
@@ -1449,23 +1682,42 @@ class QALoop:
             if actual_content:
                 return summary + actual_content
             return summary
-        elif tool_name == "query_rim" and isinstance(data, dict):
+        elif tool_name in ("get_code_relationships", "query_rim") and isinstance(data, dict):
+            display_name = tool_name
             if not data.get("found"):
                 resolution = data.get("resolution", "")
                 msg = data.get("message", "")
                 fallback = data.get("fallback")
                 fb_str = f" Suggested next step: call {fallback['tool']}(query='{fallback['query']}')" if fallback else ""
                 if resolution == "NO_STATIC_EDGE_FOUND":
-                    return f"[query_rim] No static edge found: {msg}.{fb_str}"
-                return f"[query_rim] Entity not found: {msg}.{fb_str}"
+                    return f"[{display_name}] No static edge found: {msg}.{fb_str}"
+                return f"[{display_name}] Entity not found: {msg}.{fb_str}"
 
             related = data.get("related", [])
             target_info = ""
+            target_loc = ""
+            target_line = 1
             if "target" in data and isinstance(data["target"], dict):
                 t = data["target"]
-                target_info = f" for '{t.get('name', '')}' ({t.get('type', '')} at {t.get('location', '')}:{t.get('line', '')})"
+                target_loc = t.get("location", "")
+                target_line = t.get("line", 1) or 1
+                target_info = f" for '{t.get('name', '')}' ({t.get('type', '')} at {target_loc}:{target_line})"
 
-            summary = f"[query_rim] Found {len(related)} related entities{target_info}:\n"
+            summary = f"[{display_name}] Found {len(related)} related entities{target_info}:\n"
+            inspection_recommendations = []
+
+            # Guide to inspect the caller/target implementation itself if known
+            if target_loc and target_loc not in ("?", ""):
+                try:
+                    t_ln = int(target_line)
+                    start_w = max(1, t_ln - 5)
+                    end_w = t_ln + 50
+                    inspection_recommendations.append(
+                        f"read_file(path='{target_loc}', start_line={start_w}, end_line={end_w}) to inspect caller implementation"
+                    )
+                except (ValueError, TypeError):
+                    pass
+
             for entity in related:
                 name = entity.get("name", "?")
                 entity_type = entity.get("entity_type", "?")
@@ -1474,6 +1726,25 @@ class QALoop:
                 role = entity.get("relationship_role", "?")
                 path_str = f", path: {' -> '.join(entity['path'])}" if entity.get("path") else ""
                 summary += f"  - {name} ({entity_type}, {location}:{line_num}, role: {role}{path_str})\n"
+
+                # If entity has a valid file path and line number, suggest targeted code inspection
+                if location and location not in ("?", "") and line_num not in ("?", None, ""):
+                    try:
+                        ln = int(line_num)
+                        start_win = max(1, ln - 15)
+                        end_win = ln + 25
+                        if len(inspection_recommendations) < 3:
+                            inspection_recommendations.append(
+                                f"read_file(path='{location}', start_line={start_win}, end_line={end_win}) to inspect '{name}'"
+                            )
+                    except (ValueError, TypeError):
+                        pass
+
+            if inspection_recommendations:
+                summary += "\nActionable next step for verification:\n"
+                for rec in inspection_recommendations:
+                    summary += f"- Call {rec}\n"
+
             return summary
         elif tool_name == "search_repository" and isinstance(data, list):
             summary = f"[search_repository] Found {len(data)} results:\n"

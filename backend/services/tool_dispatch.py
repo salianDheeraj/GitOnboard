@@ -189,12 +189,12 @@ class ToolDispatchTable:
             ]
             base_tools.extend(rim_tools)
 
-        # Add query_rim if RIM enabled
+        # Add get_code_relationships if RIM enabled (exposing clear name to LLM)
         if include_rim and self.graph_traverser and self.target_resolver:
             base_tools.append(
                 ToolSpec(
-                    "query_rim",
-                    "Query the Repository Intelligence Model for bounded structural relationships (CALLS, IMPORTS, INHERITS, CONTAINS, ROUTE_HANDLER, DATABASE_ACCESS, GENERIC). Use to trace callers/callees, dependencies, and execution flow. Returns structural facts and source locations, not code implementations.",
+                    "get_code_relationships",
+                    "Query the repository code relationship graph for structural connections (CALLS, IMPORTS, INHERITS, CONTAINS, ROUTE_HANDLER, DATABASE_ACCESS, GENERIC). Use when asked about callers/callees, dependencies, imports, inheritance, route handlers, or database table queries. Do NOT use for raw text searches, comments, configuration files (Docker, YAML, JSON), or string literals (use search_code or search_repository instead). Returns structural facts and file locations.",
                     {
                         "type": "object",
                         "properties": {
@@ -206,7 +206,7 @@ class ToolDispatchTable:
                                 "type": "string",
                                 "enum": ["CALLS", "IMPORTS", "INHERITS", "CONTAINS", "ROUTE_HANDLER", "DATABASE_ACCESS", "GENERIC"],
                                 "default": "GENERIC",
-                                "description": "Type of relationship to explore",
+                                "description": "Type of relationship to explore (CALLS, IMPORTS, INHERITS, ROUTE_HANDLER, DATABASE_ACCESS, etc.)",
                             },
                             "direction": {
                                 "type": "string",
@@ -253,7 +253,7 @@ class ToolDispatchTable:
 
         CRITICAL: Enforces tool restrictions based on mode (baseline vs RIM).
         Baseline can only access: read_file, search_repository, get_tree
-        RIM can access: read_file, search_repository, get_tree, get_file_outline, search_code, query_rim
+        RIM can access: read_file, search_repository, get_tree, get_file_outline, search_code, get_code_relationships (or legacy query_rim internally)
         """
         tool_call_id = f"{tool_name}:{hash(str(arguments))}"
 
@@ -261,7 +261,7 @@ class ToolDispatchTable:
         allowed_baseline_tools = {"read_file", "search_repository", "get_tree"}
         allowed_rim_tools = {
             "read_file", "search_repository", "get_tree",
-            "get_file_outline", "search_code", "query_rim"
+            "get_file_outline", "search_code", "get_code_relationships", "query_rim"
         }
 
         allowed_tools = allowed_rim_tools if self.include_rim else allowed_baseline_tools
@@ -302,8 +302,8 @@ class ToolDispatchTable:
                 return self._handle_search_code(arguments, tool_call_id)
             elif tool_name == "get_tree":
                 return self._handle_get_tree(arguments, tool_call_id)
-            elif tool_name == "query_rim":
-                return self._handle_query_rim(arguments, tool_call_id)
+            elif tool_name in ("get_code_relationships", "query_rim"):
+                return self._handle_query_rim(arguments, tool_call_id, reported_tool_name=tool_name)
             else:
                 return ToolObservation(
                     tool_call_id=tool_call_id,
@@ -339,15 +339,27 @@ class ToolDispatchTable:
                 error={"type": "invalid_args", "message": "path is required"},
             )
 
+        kwargs: Dict[str, Any] = {"context_lines": context_lines}
+        if max_content_tokens is not None:
+            kwargs["max_content_tokens"] = max_content_tokens
+            kwargs["control_reservation_tokens"] = control_reservation_tokens
+
         try:
-            result = self.tool_layer.read_file(
-                path,
-                start_line,
-                end_line,
-                context_lines=context_lines,
-                max_content_tokens=max_content_tokens,
-                control_reservation_tokens=control_reservation_tokens,
-            )
+            try:
+                result = self.tool_layer.read_file(
+                    path,
+                    start_line,
+                    end_line,
+                    **kwargs,
+                )
+            except TypeError:
+                # Fallback if mock or tool_layer doesn't accept token reservation kwargs
+                result = self.tool_layer.read_file(
+                    path,
+                    start_line,
+                    end_line,
+                    context_lines=context_lines,
+                )
             # Check if result contains an error (file not found)
             if "error" in result:
                 return ToolObservation(
@@ -547,12 +559,12 @@ class ToolDispatchTable:
                 error={"type": "tree_error", "message": str(e)},
             )
 
-    def _handle_query_rim(self, arguments: Dict[str, Any], tool_call_id: str) -> ToolObservation:
-        """Handle query_rim tool call (RIM side only)."""
+    def _handle_query_rim(self, arguments: Dict[str, Any], tool_call_id: str, reported_tool_name: str = "get_code_relationships") -> ToolObservation:
+        """Handle get_code_relationships / query_rim tool call (RIM side only)."""
         if not self.graph_traverser or not self.target_resolver:
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name="query_rim", success=False,
-                error={"type": "unavailable", "message": "query_rim not available on this side"},
+                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=False,
+                error={"type": "unavailable", "message": f"{reported_tool_name} not available on this side"},
             )
 
         entity_name = str(arguments.get("entity_name", "")).strip()
@@ -564,7 +576,7 @@ class ToolDispatchTable:
 
         if not entity_name:
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name="query_rim", success=False,
+                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=False,
                 error={"type": "invalid_args", "message": "entity_name is required"},
             )
 
@@ -590,9 +602,9 @@ class ToolDispatchTable:
             # Resolve entity
             target = self.target_resolver.resolve(entity_name)
             if not target:
-                logger.debug(f"[query_rim] Entity '{entity_name}' not found in repository index")
+                logger.debug(f"[{reported_tool_name}] Entity '{entity_name}' not found in repository index")
                 return ToolObservation(
-                    tool_call_id=tool_call_id, tool_name="query_rim", success=True,
+                    tool_call_id=tool_call_id, tool_name=reported_tool_name, success=True,
                     data={
                         "found": False,
                         "resolution": "ENTITY_NOT_FOUND",
@@ -604,7 +616,7 @@ class ToolDispatchTable:
                     },
                 )
 
-            logger.debug(f"[query_rim] Resolved '{entity_name}' to {type(target).__name__}")
+            logger.debug(f"[{reported_tool_name}] Resolved '{entity_name}' to {type(target).__name__}")
 
             if hasattr(self.graph_traverser, "traverse_bounded"):
                 result = self.graph_traverser.traverse_bounded(
@@ -627,9 +639,9 @@ class ToolDispatchTable:
                 result = self.graph_traverser.traverse(intent, target)
 
             if not result.related_entities:
-                logger.debug(f"[query_rim] No related entities for '{entity_name}' ({relationship_type}, {direction})")
+                logger.debug(f"[{reported_tool_name}] No related entities for '{entity_name}' ({relationship_type}, {direction})")
                 return ToolObservation(
-                    tool_call_id=tool_call_id, tool_name="query_rim", success=True,
+                    tool_call_id=tool_call_id, tool_name=reported_tool_name, success=True,
                     data={
                         "found": False,
                         "resolution": "NO_STATIC_EDGE_FOUND",
@@ -663,9 +675,9 @@ class ToolDispatchTable:
             target_loc = getattr(target, "path", target.file.path if getattr(target, "file", None) else "")
             target_line = getattr(target, "line_start", 1)
 
-            logger.debug(f"[query_rim] Found {len(related_list)} related entities for '{entity_name}'")
+            logger.debug(f"[{reported_tool_name}] Found {len(related_list)} related entities for '{entity_name}'")
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name="query_rim", success=True,
+                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=True,
                 data={
                     "found": True,
                     "resolution": "STATIC_CONFIRMED",
@@ -684,9 +696,9 @@ class ToolDispatchTable:
             )
 
         except Exception as e:
-            logger.error(f"query_rim error: {e}", exc_info=True)
+            logger.error(f"{reported_tool_name} error: {e}", exc_info=True)
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name="query_rim", success=False,
+                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=False,
                 error={"type": "traversal_error", "message": str(e)},
             )
 
