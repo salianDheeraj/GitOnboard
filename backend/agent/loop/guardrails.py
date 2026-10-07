@@ -42,6 +42,92 @@ class LoopGuardrails:
         self.command_count = 0
         self.start_time = time.perf_counter()
         self.recent_signatures: List[str] = []
+        # Session-wide history tracking: sig -> dict with call count, last_success, last_data, error
+        self.executed_tools: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def normalize_arguments(arguments: Any) -> str:
+        """
+        Recursively normalize arguments into a canonical JSON string
+        independent of key ordering or dictionary implementation.
+        """
+        import json
+
+        def _sort_obj(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return {k: _sort_obj(v) for k, v in sorted(obj.items())}
+            elif isinstance(obj, list):
+                return [_sort_obj(item) for item in obj]
+            return obj
+
+        try:
+            sorted_obj = _sort_obj(arguments)
+            return json.dumps(sorted_obj, sort_keys=True, separators=(',', ':'), default=str)
+        except Exception:
+            return str(sorted(arguments.items())) if isinstance(arguments, dict) else str(arguments)
+
+    def get_tool_signature(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """Returns the canonical normalized signature for a tool invocation."""
+        norm_args = self.normalize_arguments(arguments)
+        return f"{tool_name}:{norm_args}"
+
+    def is_duplicate_call(self, tool_name: str, arguments: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """
+        Checks if the tool call with identical normalized arguments has already been executed
+        in the current QA session and returned a successful, non-empty result.
+
+        Returns:
+            Tuple[bool, Optional[str]]:
+              - bool indicating if this call is an unnecessary duplicate.
+              - reason/feedback string for the model if it is a duplicate.
+        """
+        sig = self.get_tool_signature(tool_name, arguments)
+        record = self.executed_tools.get(sig)
+        if not record:
+            return False, None
+
+        # Do not block if the previous call failed or had an execution error
+        if not record.get("success", False):
+            return False, None
+
+        # Do not block if previous result was unavailable or empty/not found
+        data = record.get("data")
+        if data is None:
+            return False, None
+        if isinstance(data, (list, dict, str)) and len(data) == 0:
+            return False, None
+
+        first_turn = record.get("turn_index", "earlier")
+        feedback = (
+            f"[DUPLICATE TOOL CALL] You already called '{tool_name}' with these exact arguments in Turn {first_turn}, "
+            f"and the result is already available in your conversation history. "
+            f"Do not repeat identical calls. Please use the existing findings above, investigate a different path, "
+            f"or synthesize your final answer."
+        )
+        return True, feedback
+
+    def record_tool_result(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        success: bool,
+        data: Any = None,
+        error: Any = None,
+        turn_index: Optional[int] = None,
+    ) -> None:
+        """
+        Records the outcome of a tool execution for session-wide duplicate detection.
+        """
+        sig = self.get_tool_signature(tool_name, arguments)
+        self.executed_tools[sig] = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "success": success,
+            "data": data,
+            "error": error,
+            "turn_index": turn_index if turn_index is not None else self.turn_count,
+            "call_count": self.executed_tools.get(sig, {}).get("call_count", 0) + 1,
+        }
 
     def record_turn(self) -> None:
         """Records the progression of an agent turn."""
@@ -85,12 +171,7 @@ class LoopGuardrails:
                 return StopReason.MAX_COMMANDS_EXCEEDED, False
 
         # Normalized signature hashing
-        try:
-            sorted_args = json.dumps(arguments, sort_keys=True, default=str)
-        except Exception:
-            sorted_args = str(sorted(arguments.items()))
-
-        sig = f"{tool_name}:{sorted_args}"
+        sig = self.get_tool_signature(tool_name, arguments)
         self.recent_signatures.append(sig)
 
         logger.debug(f"LoopGuardrails: Tool call #{self.tool_call_count}: {tool_name} (recent signatures: {len(self.recent_signatures)})")

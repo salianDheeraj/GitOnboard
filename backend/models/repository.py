@@ -11,7 +11,7 @@ class Repository(Base):
     __tablename__ = "repositories"
 
     id = Column(Integer, primary_key=True, index=True)
-    repository_hash = Column(String(36), index=True, nullable=False, unique=True)  # UUID v4
+    repository_hash = Column(String(36), nullable=False)  # UUID v4
     github_repo_id = Column(String, index=True, nullable=True)
     url = Column(String, index=True, nullable=False)
     default_branch = Column(String, nullable=True)

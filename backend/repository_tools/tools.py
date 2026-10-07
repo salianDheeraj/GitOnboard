@@ -153,7 +153,48 @@ class RepositoryToolLayer:
             lines = resolved_text.splitlines(keepends=True)
             total_lines = len(lines)
 
-            s, e = clamp_line_range(total_lines, start_line, end_line)
+            # 1. Check unbounded read on large files (> 150 lines)
+            if end_line is None and total_lines > 150:
+                return {
+                    "path": clean_path,
+                    "error": "context_overflow_protection",
+                    "message": (
+                        f"Refusing full file read: '{clean_path}' has {total_lines} lines. "
+                        f"Reading the entire file without line boundaries will cause context overflow. "
+                        f"Please use start_line and end_line (safe read limit is 250 lines), "
+                        f"or run get_file_outline first."
+                    ),
+                    "total_lines": total_lines,
+                }
+
+            # 2. Handle invalid/reversed/out-of-bounds line ranges consistently
+            # If end_line was provided and end_line < start_line, swap them
+            if end_line is not None and end_line < start_line:
+                start_line, end_line = end_line, start_line
+
+            # If start_line exceeds total_lines, return a clean error without crashing
+            if start_line > total_lines:
+                return {
+                    "path": clean_path,
+                    "error": "invalid_range",
+                    "message": f"Start line {start_line} exceeds total file lines ({total_lines}).",
+                    "total_lines": total_lines,
+                }
+
+            orig_requested_start = max(1, start_line)
+            orig_requested_end = min(total_lines, end_line) if end_line is not None else min(total_lines, orig_requested_start + 249)
+
+            # 3. Enforce safe line range limit (max 250 lines)
+            range_clamped = False
+            SAFE_MAX_LINES = 250
+            if (orig_requested_end - orig_requested_start + 1) > SAFE_MAX_LINES:
+                target_end = orig_requested_start + SAFE_MAX_LINES - 1
+                range_clamped = True
+            else:
+                target_end = orig_requested_end
+
+            s = orig_requested_start
+            e = target_end
             if context_lines > 0:
                 s = max(1, s - context_lines)
                 e = min(total_lines, e + context_lines)
@@ -174,7 +215,18 @@ class RepositoryToolLayer:
             actual_end = s + count_taken - 1
             numbered_content = "".join(f"{s + idx:4d} | {line}" for idx, line in enumerate(selected_lines))
 
-            if was_clamped and actual_end < e:
+            # Provide transparent notices so the model knows exact status and how to fetch remaining content
+            effective_is_truncated = (was_clamped and actual_end < e) or (range_clamped and target_end < orig_requested_end)
+            if range_clamped and target_end < orig_requested_end:
+                next_start = target_end + 1
+                notice = (
+                    f"\n\n[Notice: Requested range {orig_requested_start}-{orig_requested_end} exceeds safe limit of {SAFE_MAX_LINES} lines; "
+                    f"clamped to lines {s}-{target_end}. "
+                    f"To inspect further, call read_file(path=\"{clean_path}\", start_line={next_start}, end_line={orig_requested_end}) "
+                    f"or call get_file_outline(path=\"{clean_path}\") to locate symbols.]"
+                )
+                numbered_content += notice
+            elif was_clamped and actual_end < e:
                 next_start = actual_end + 1
                 remaining_lines_count = e - actual_end
                 notice = (
@@ -186,18 +238,21 @@ class RepositoryToolLayer:
                 )
                 numbered_content += notice
 
+            effective_remaining = (orig_requested_end - actual_end) if actual_end < orig_requested_end else 0
+            effective_next_start = (actual_end + 1) if actual_end < orig_requested_end else None
+
             return {
                 "path": clean_path,
                 "start_line": s,
                 "end_line": actual_end,
-                "requested_start_line": s,
-                "requested_end_line": e,
+                "requested_start_line": orig_requested_start,
+                "requested_end_line": orig_requested_end,
                 "total_lines": total_lines,
                 "content": numbered_content,
                 "raw_text": "".join(selected_lines),
-                "is_truncated": was_clamped and (actual_end < e),
-                "next_start_line": actual_end + 1 if (was_clamped and actual_end < e) else None,
-                "remaining_lines": (e - actual_end) if (was_clamped and actual_end < e) else 0,
+                "is_truncated": effective_is_truncated,
+                "next_start_line": effective_next_start,
+                "remaining_lines": effective_remaining,
             }
 
         except FileNotFoundError:
@@ -435,6 +490,19 @@ class RepositoryToolLayer:
         # DIAGNOSTIC: Log precondition state at entry
         logger.error(f"[search_code:DIAGNOSTIC] ENTRY query='{query[:50]}' repo='{self.repo_name}' db={self.db is not None} analysis_id={self.analysis_id}")
 
+        def _pattern_matches(path: str, pat: Optional[str]) -> bool:
+            if not pat:
+                return True
+            base = os.path.basename(path)
+            # Standard glob check
+            if fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(base, pat):
+                return True
+            # When searching for python source files (e.g. *.py, **/*.py), also match jupyter notebooks
+            if pat.endswith(".py") or pat == "*.py":
+                if path.endswith(".ipynb") or base.endswith(".ipynb"):
+                    return True
+            return False
+
         # Validate preconditions
         if self.db is None or self.analysis_id is None:
             if self.repo_root and os.path.exists(self.repo_root):
@@ -444,16 +512,23 @@ class RepositoryToolLayer:
                 except re.error:
                     pattern = re.compile(re.escape(query), re.IGNORECASE)
 
+                from backend.intelligence.notebook import resolve_source_document
                 scanned = 0
                 for file_path in root_path.rglob("*"):
                     if not file_path.is_file():
                         continue
-                    if file_pattern and not fnmatch.fnmatch(file_path.name, file_pattern):
-                        continue
                     rel_path = file_path.relative_to(root_path).as_posix()
+                    if not _pattern_matches(rel_path, file_pattern):
+                        continue
                     scanned += 1
                     try:
-                        content = file_path.read_text(encoding="utf-8", errors="replace")
+                        raw_content = file_path.read_text(encoding="utf-8", errors="replace")
+                        if rel_path.endswith(".ipynb"):
+                            doc = resolve_source_document(rel_path, raw_content)
+                            content = doc.source if not doc.conversion_error else raw_content
+                        else:
+                            content = raw_content
+
                         for idx, line in enumerate(content.splitlines(), start=1):
                             if pattern.search(line):
                                 results.append({
@@ -510,7 +585,7 @@ class RepositoryToolLayer:
         files_with_matches = 0
 
         for f_rec in files:
-            if file_pattern and not fnmatch.fnmatch(f_rec.path, file_pattern) and not fnmatch.fnmatch(os.path.basename(f_rec.path), file_pattern):
+            if not _pattern_matches(f_rec.path, file_pattern):
                 continue
             if not f_rec.blob_name:
                 try:

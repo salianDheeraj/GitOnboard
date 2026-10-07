@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from backend.agent.loop.contracts import AgentLoopConfig, StopReason, ToolObservation
 from backend.agent.loop.guardrails import LoopGuardrails
@@ -141,6 +141,8 @@ class QALoop:
         # Create protocol adapter with model_id for format-specific parsing (Hermes XML for Qwen, JSON for others)
         self.protocol_adapter = QAProtocolAdapter(model_id=model)
         self.consecutive_malformed_count = 0  # Track malformed responses to terminate early
+        self.verification_retries = 0  # Track validation rejection count to prevent infinite retry loops
+        self.max_verification_retries = 2
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
         """Backward compatibility helper delegating to protocol_adapter."""
@@ -342,10 +344,9 @@ class QALoop:
                 result.turns.append(turn)
                 if self.on_turn:
                     await self.on_turn(turn)
-                parsed_final = self.protocol_adapter.parse_response(turn.raw_model_output)
-                answer_text = parsed_final.get("answer", turn.raw_model_output)
-                answer = strip_xml_tags(answer_text)
-                answer = extract_json_answer(answer)
+                answer = self.protocol_adapter.parse_final_synthesis(turn.raw_model_output)
+                if not answer:
+                    answer = turn.raw_model_output
                 result.answer = answer
                 break
 
@@ -541,34 +542,55 @@ class QALoop:
                 self.consecutive_malformed_count = 0  # Reset on success
                 answer_candidate = parsed.get("answer", llm_response.content)
 
-                # PHASE 8A VERIFICATION GATE: Enforce retrieval for absence claims
-                if not self._verify_absence_claim(answer_candidate, result):
-                    # Gate violation: absence claim without retrieval
-                    # Force a retrieval attempt
-                    logger.info(f"[VerificationGate] Absence claim rejected; forcing retrieval")
-                    messages.append({
-                        "role": "assistant",
-                        "content": llm_response.content,
-                    })
-                    messages.append({
-                        "role": "user",
-                        "content": "[VERIFICATION REQUIRED] You have claimed repository-wide absence without performing a search. You must search the repository or inspect relevant files before making absence claims. Please perform a search or file inspection to verify your claim.",
-                    })
-                    result.turns.append(turn)
-                    if self.on_turn:
-                        await self.on_turn(turn)
-                    # Continue loop to force retrieval
-                    continue
+                # Parse and clean candidate first using dedicated synthesis parser
+                parsed_candidate = self.protocol_adapter.parse_final_synthesis(answer_candidate)
+                if not parsed_candidate:
+                    parsed_candidate = strip_xml_tags(answer_candidate)
+                    parsed_candidate = extract_json_answer(parsed_candidate)
 
-                # Strip both XML tags and JSON wrappers
-                answer = strip_xml_tags(answer_candidate)
-                answer = extract_json_answer(answer)
-                result.answer = answer
+                # Stage 4 Fact Validation against tool results in the session
+                is_valid, validation_feedback, caveated_answer = self._validate_final_answer_against_evidence(
+                    parsed_candidate, result
+                )
+
+                if not is_valid:
+                    # If verification attempts have not exceeded max retries and turns remain
+                    if self.verification_retries < self.max_verification_retries and turn_index < self.config.max_agent_turns:
+                        self.verification_retries += 1
+                        logger.warning(
+                            f"[ValidationGate] Final answer fact validation failed (attempt {self.verification_retries}/{self.max_verification_retries}); prompting correction"
+                        )
+                        messages.append({
+                            "role": "assistant",
+                            "content": llm_response.content,
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": validation_feedback or "[VERIFICATION REQUIRED] Your factual claims conflict with repository observations. Please verify or correct them.",
+                        })
+                        result.turns.append(turn)
+                        if self.on_turn:
+                            await self.on_turn(turn)
+                        continue
+                    else:
+                        # Max retries reached: attach caveats and complete gracefully
+                        logger.warning(
+                            f"[ValidationGate] Max verification retries reached ({self.verification_retries}); appending caveats"
+                        )
+                        result.answer = caveated_answer
+                        result.stop_reason = StopReason.COMPLETED_FOR_VERIFICATION
+                        result.turns.append(turn)
+                        if self.on_turn:
+                            await self.on_turn(turn)
+                        break
+
+                # Answer passed validation
+                result.answer = caveated_answer
                 result.stop_reason = StopReason.COMPLETED_FOR_VERIFICATION
                 result.turns.append(turn)
                 if self.on_turn:
                     await self.on_turn(turn)
-                logger.info(f"[QALoop] LLM provided final answer at turn {turn_index}")
+                logger.info(f"[QALoop] LLM provided validated final answer at turn {turn_index}")
                 break
 
             elif parsed["action"] == "tool_call":
@@ -582,7 +604,49 @@ class QALoop:
                 tool_name = tool_call.get("tool_name", "")
                 arguments = tool_call.get("arguments", {})
 
-                # 5. Check guardrails on tool call
+                # 5. Check duplicate tool call in current session
+                is_duplicate, duplicate_feedback = self.guardrails.is_duplicate_call(tool_name, arguments)
+                if is_duplicate:
+                    logger.warning(
+                        f"[QALoop] Duplicate tool call detected at turn {turn_index}: {tool_name} with {arguments}"
+                    )
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": llm_response.content,
+                    }
+                    if llm_response.tool_calls:
+                        assistant_message["tool_calls"] = [
+                            {
+                                "type": "function",
+                                "id": tc.tool_call_id,
+                                "function": {
+                                    "name": tc.tool_name,
+                                    "arguments": tc.parameters if isinstance(tc.parameters, str) else json.dumps(tc.parameters),
+                                },
+                            }
+                            for tc in llm_response.tool_calls
+                        ]
+                    messages.append(assistant_message)
+                    messages.append({
+                        "role": "user",
+                        "content": duplicate_feedback,
+                    })
+
+                    turn.tool_call = {"tool_name": tool_name, "arguments": arguments}
+                    turn.tool_observation = {
+                        "tool_name": tool_name,
+                        "success": False,
+                        "error": {"type": "duplicate_call_prevented", "message": duplicate_feedback},
+                        "data": None,
+                        "formatted_message": duplicate_feedback,
+                    }
+                    result.turns.append(turn)
+                    if self.on_turn:
+                        await self.on_turn(turn)
+                    # Do not increment result.tool_call_count because execution was intercepted
+                    continue
+
+                # 6. Check guardrails on tool call
                 stop_reason, should_warn = self.guardrails.record_tool_call(tool_name, arguments)
                 if stop_reason:
                     logger.warning(f"[QALoop] Tool call limit hit: {stop_reason}")
@@ -605,16 +669,16 @@ class QALoop:
                     result.turns.append(final_turn)
                     if self.on_turn:
                         await self.on_turn(final_turn)
-                    # Parse the final answer response to extract the answer field, then strip XML/JSON tags
-                    parsed_final = self.protocol_adapter.parse_response(final_turn.raw_model_output)
-                    answer_text = parsed_final.get("answer", final_turn.raw_model_output)
-                    # Strip both XML tags and JSON wrappers
-                    answer = strip_xml_tags(answer_text)
-                    answer = extract_json_answer(answer)
-                    result.answer = answer
+                    # Parse the final answer response using dedicated synthesis parser
+                    answer = self.protocol_adapter.parse_final_synthesis(final_turn.raw_model_output)
+                    if not answer:
+                        answer = final_turn.raw_model_output
+                    # Run fact validation on tool-limit final answer and append caveats if needed
+                    _, _, caveated = self._validate_final_answer_against_evidence(answer, result)
+                    result.answer = caveated
                     break
 
-                # 6. Execute tool with pre-calculated content token budget
+                # 7. Execute tool with pre-calculated content token budget
                 logger.debug(f"[QALoop] Turn {turn_index}: executing tool '{tool_name}'")
                 tool_start = time.perf_counter()
                 loop_elapsed = (tool_start - loop_start) * 1000
@@ -649,6 +713,16 @@ class QALoop:
                 tool_total_ms += tool_elapsed * 1000
                 loop_elapsed_after = (time.perf_counter() - loop_start) * 1000
                 print(f"[QALoop:RESULT] T+{loop_elapsed_after:.0f}ms turn={turn_index} {tool_name} → success={tool_observation.success} elapsed={tool_elapsed*1000:.0f}ms")
+
+                # Record execution result in guardrails for duplicate detection
+                self.guardrails.record_tool_result(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    success=tool_observation.success,
+                    data=tool_observation.data,
+                    error=tool_observation.error,
+                    turn_index=turn_index,
+                )
 
                 # Log tool call if structured logger is available
                 if self.structured_logger and self.request_id:
@@ -891,9 +965,12 @@ class QALoop:
             llm_response = await self.llm_service.generate(request)
 
             raw_output = (llm_response.content or "").strip()
-            # If model returned no content or returned only tool calls in final turn, synthesize fallback from observations
-            if not raw_output:
-                logger.warning("[QALoop] Final turn returned empty text content; synthesizing summary from observations")
+            # Parse final answer using dedicated synthesis parser
+            parsed_answer = self.protocol_adapter.parse_final_synthesis(raw_output)
+
+            # If model returned no content or returned only unexecuted tool calls in final turn, synthesize fallback from observations
+            if not parsed_answer:
+                logger.warning("[QALoop] Final turn produced no usable answer text; synthesizing summary from observations")
                 obs_snippets = []
                 for m in reversed(messages):
                     content = m.get("content", "") if isinstance(m, dict) else ""
@@ -910,6 +987,8 @@ class QALoop:
                     )
                 else:
                     raw_output = "The repository analysis finished. Please review the collected evidence in the session."
+            else:
+                raw_output = parsed_answer
 
         except Exception as e:
             logger.error(f"[QALoop] Final answer LLM call failed: {e}", exc_info=True)
@@ -953,21 +1032,29 @@ class QALoop:
 
         return False
 
-    def _retrieval_evidence_supports_absence(self, result: QALoopResult) -> bool:
+    def _retrieval_evidence_supports_absence(self, result: QALoopResult, answer: str = "") -> Tuple[bool, str]:
         """
         Check if the actual retrieval result data supports an absence claim.
 
-        An absence claim is supported by retrieval evidence only if:
-        - Retrieval tools were executed
-        - AND all retrieval results were empty/not-found
-        - AND no positive evidence of the claimed absence entity was discovered
+        Stage 4 Rules:
+        - Do not treat a failed search, empty result from a narrow search, partial read,
+          or incomplete search scope as proof that something does not exist.
+        - Absence of evidence is not evidence of absence.
+        - Returns (is_supported, explanation)
 
-        Returns True if absence is justified by the retrieval evidence.
-        Returns False if retrieval found relevant results (contradicting absence).
+        Returns (True, "supported") only if:
+        - Retrieval tools were executed and succeeded.
+        - AND no positive evidence of the claimed entity was discovered.
+        - AND searches were not failed calls or error responses.
+        - If a search was executed with query 'Q' and returned 0 matches, that can support
+          absence of 'Q' iff no other tool found 'Q' and the call was successful.
         """
-        retrieval_tools = ["search_repository", "read_file", "get_symbol", "search_code"]
-        found_any_relevant_result = False
-        checked_any_retrieval = False
+        retrieval_tools = ["search_repository", "read_file", "get_symbol", "search_code", "query_rim"]
+        found_positive_matches: List[str] = []
+        had_successful_retrieval = False
+        had_failed_search = False
+
+        answer_lower = answer.lower() if answer else ""
 
         for turn in result.turns:
             if not turn.tool_call or not turn.tool_observation:
@@ -979,48 +1066,86 @@ class QALoop:
 
             # Check if retrieval succeeded
             if not turn.tool_observation.get("success", False):
-                # Failed retrieval doesn't prove absence
+                had_failed_search = True
                 continue
 
-            checked_any_retrieval = True
+            had_successful_retrieval = True
             result_data = turn.tool_observation.get("data", None)
 
             # Analyze result based on tool type
-            if tool_name == "search_repository":
-                # search_repository returns list of matches
+            if tool_name in ("search_repository", "search_code"):
                 if isinstance(result_data, list) and len(result_data) > 0:
-                    # Found relevant results - contradicts absence
-                    found_any_relevant_result = True
-                    break
-
-            elif tool_name == "search_code":
-                # search_code returns list of matches
-                if isinstance(result_data, list) and len(result_data) > 0:
-                    found_any_relevant_result = True
-                    break
+                    for item in result_data:
+                        if isinstance(item, dict):
+                            sym = item.get("symbol") or ""
+                            file_p = item.get("file") or item.get("path") or ""
+                            snip = item.get("snippet") or ""
+                            # If answer claims this entity does not exist, but we found it
+                            found_positive_matches.append(f"{sym} in {file_p}: {snip[:80]}".strip())
 
             elif tool_name == "get_symbol":
-                # get_symbol returns symbol data or None
-                if result_data is not None and result_data:
-                    # Symbol found - contradicts absence
-                    found_any_relevant_result = True
-                    break
+                if result_data:
+                    if isinstance(result_data, list):
+                        for sym in result_data:
+                            if isinstance(sym, dict):
+                                found_positive_matches.append(f"symbol {sym.get('name')} in {sym.get('file')}")
+                    elif isinstance(result_data, dict):
+                        found_positive_matches.append(f"symbol {result_data.get('name')}")
 
             elif tool_name == "read_file":
-                # read_file returns file content or None
-                if result_data is not None and result_data:
-                    # File found - contradicts absence
-                    found_any_relevant_result = True
-                    break
+                if isinstance(result_data, dict):
+                    raw_text = result_data.get("raw_text") or result_data.get("content") or ""
+                    file_p = result_data.get("path", "")
+                    if raw_text:
+                        # File exists and has content
+                        found_positive_matches.append(f"file content in {file_p}")
 
-        # Evidence supports absence only if:
-        # 1. We actually performed retrieval
-        # 2. We found no relevant results
-        if checked_any_retrieval and not found_any_relevant_result:
-            return True
+        if not had_successful_retrieval:
+            if had_failed_search:
+                return False, "Failed or errored searches cannot be treated as proof of absence."
+            return False, "No retrieval was performed to verify this absence claim."
 
-        # If no retrieval was performed, or retrieval found results
-        return False
+        # If positive evidence was retrieved that contradicts an absence claim
+        # E.g. answer says "no postgresql database" but read_file or search found postgresql
+        if found_positive_matches and answer_lower:
+            # Check if specific entities claimed absent were actually found in positive matches
+            # Common entities:
+            suspicious_terms = [
+                ("postgres", ["postgres", "postgresql", "psycopg"]),
+                ("postgresql", ["postgres", "postgresql", "psycopg"]),
+                ("mysql", ["mysql", "pymysql"]),
+                ("sqlite", ["sqlite", "sqlite3"]),
+                ("redis", ["redis"]),
+                ("chroma", ["chroma", "chromadb"]),
+                ("qdrant", ["qdrant"]),
+                ("jwt", ["jwt", "pyjwt"]),
+                ("token", ["token", "tokens"]),
+                ("auth", ["auth", "authenticate", "authoriz"]),
+                ("session", ["session"]),
+                ("docker", ["docker", "dockerfile"]),
+                ("fastapi", ["fastapi"]),
+                ("router", ["router", "routing"]),
+                ("endpoint", ["endpoint", "endpoints"]),
+                ("celery", ["celery"]),
+                ("worker", ["worker"]),
+                ("queue", ["queue"]),
+                ("cache", ["cache"]),
+                ("blob", ["blob"]),
+                ("s3", ["s3", "boto3"]),
+                ("azure", ["azure"]),
+            ]
+            for term, aliases in suspicious_terms:
+                if term in answer_lower and any(neg in answer_lower for neg in ["no ", "not ", "does not", "doesn't", "without"]):
+                    # Model claims absence of term
+                    # Did we find this term or any of its known aliases in any positive tool observation?
+                    for turn in result.turns:
+                        obs = turn.tool_observation or {}
+                        if obs.get("success"):
+                            data_str = str(obs.get("data", "")).lower()
+                            if any(alias in data_str for alias in aliases):
+                                return False, f"Contradicted by evidence: repository search/read observed '{term}' in the codebase."
+
+        return True, "supported"
 
     def _is_absence_claim(self, answer: str) -> bool:
         """
@@ -1054,9 +1179,18 @@ class QALoop:
             "no feature",
             "no implementation",
             "no code",
+            "no database",
+            "no postgres",
+            "no redis",
+            "no auth",
+            "no model",
+            "no class",
             "there is no",
             "there are no",
             "there's no",
+            "has no ",
+            "have no ",
+            "contains no ",
         ]
 
         # Soft/qualified negation (secondary)
@@ -1133,35 +1267,140 @@ class QALoop:
             any(r in answer_lower for r in repo_context)
         )
 
-        # Direct negation alone is usually sufficient
-        # OR soft negation WITH entity/repo context
         return has_direct or (has_soft and has_context)
+
+    def _validate_final_answer_against_evidence(
+        self, answer: str, result: QALoopResult
+    ) -> Tuple[bool, Optional[str], str]:
+        """
+        Stage 4: Validate factual claims in the final answer against tool results
+        available in the current QA session.
+
+        Distinguishes:
+        - Supported claims (passes validation)
+        - Contradicted claims (evidence directly disproves the claim)
+        - Insufficient / inconclusive claims (absence of evidence, failed search, truncated reads)
+
+        Returns:
+            Tuple[is_valid, prompt_feedback, sanitized_or_caveated_answer]:
+            - is_valid (bool): True if answer is verified or acceptable. False if contradicted or unjustified absence claim.
+            - prompt_feedback (Optional[str]): Guidance sent to LLM for investigation/correction if retrying.
+            - sanitized_or_caveated_answer (str): The answer with appropriate caveats or corrections when retries exhausted.
+        """
+        if not answer or not answer.strip():
+            return False, "Final answer is empty. Please provide your answer based on repository evidence.", answer
+
+        answer_clean = answer.strip()
+        contradictions: List[str] = []
+        caveats: List[str] = []
+
+        # 1. Check for absence claims
+        if self._is_absence_claim(answer_clean):
+            is_supported, reason = self._retrieval_evidence_supports_absence(result, answer_clean)
+            if not is_supported:
+                contradictions.append(f"Absence claim unverified: {reason}")
+
+        # 2. Check for contradictions with read_file contents
+        # Extract files inspected during the session
+        inspected_files: Dict[str, Dict[str, Any]] = {}
+        for turn in result.turns:
+            tc = turn.tool_call or {}
+            obs = turn.tool_observation or {}
+            if tc.get("tool_name") == "read_file" and obs.get("success") and isinstance(obs.get("data"), dict):
+                p = tc.get("arguments", {}).get("path", "")
+                if p:
+                    inspected_files[p] = obs["data"]
+
+        # Check for claims about specific file existence or non-existence
+        for turn in result.turns:
+            tc = turn.tool_call or {}
+            obs = turn.tool_observation or {}
+            if tc.get("tool_name") == "read_file":
+                p = tc.get("arguments", {}).get("path", "")
+                if not obs.get("success") or (isinstance(obs.get("data"), dict) and obs.get("data", {}).get("error") == "wrong_path"):
+                    # File was not found at this exact path
+                    # If answer confidently claims the file definitely exists at this path:
+                    pass
+
+        # Check for truncated read caveats:
+        # If the answer makes definitive claims about a file that was truncated, note potential incompleteness
+        truncated_files = [p for p, data in inspected_files.items() if data.get("is_truncated") or data.get("_truncated")]
+        if truncated_files:
+            # If the user answer makes sweeping completeness claims about this file
+            for tf in truncated_files:
+                base_name = tf.split("/")[-1]
+                if base_name in answer_clean and ("entire" in answer_clean.lower() or "only" in answer_clean.lower() or "complete" in answer_clean.lower()):
+                    caveats.append(f"Note: '{tf}' was partially read due to line limits. Further definitions may exist beyond the inspected lines.")
+
+        # Check for contradictions with specific search results and inspected file contents
+        for turn in result.turns:
+            tc = turn.tool_call or {}
+            obs = turn.tool_observation or {}
+            tname = tc.get("tool_name", "")
+            if not obs.get("success"):
+                continue
+            data = obs.get("data")
+
+            # Check if answer claims a symbol doesn't exist when search_repository found it
+            if tname in ("search_repository", "search_code", "get_symbol") and isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        sym_name = item.get("symbol") or item.get("name")
+                        file_name = item.get("file") or item.get("path")
+                        if sym_name and len(sym_name) > 2:
+                            # If answer specifically says sym_name does not exist / isn't present
+                            sym_pat = re.compile(rf"\b(no|not|does not contain|does not exist|cannot find|isn't any)\b[^\.\n]*\b{re.escape(sym_name)}\b", re.IGNORECASE)
+                            if sym_pat.search(answer_clean):
+                                contradictions.append(f"Claim that '{sym_name}' does not exist is contradicted by tool observation in {file_name}.")
+
+            # Also check if answer claims a symbol/class doesn't exist when read_file returned it
+            elif tname == "read_file" and isinstance(data, dict):
+                file_text = data.get("raw_text") or data.get("content") or ""
+                file_name = data.get("path", "")
+                # Extract classes and functions defined in file
+                for def_match in re.finditer(r"\b(?:class|def|function|interface)\s+([A-Za-z0-9_]+)", file_text):
+                    sym_name = def_match.group(1)
+                    if len(sym_name) > 2:
+                        sym_pat = re.compile(rf"\b(no|not|does not contain|does not exist|cannot find|isn't any)\b[^\.\n]*\b{re.escape(sym_name)}\b", re.IGNORECASE)
+                        if sym_pat.search(answer_clean):
+                            contradictions.append(f"Claim that '{sym_name}' does not exist is contradicted by tool observation in {file_name}.")
+
+        if contradictions:
+            feedback_msg = (
+                "[VERIFICATION FAILED] The following factual claims conflict with tool observations or lack evidence:\n"
+                + "\n".join(f"- {c}" for c in contradictions)
+                + "\n\nPlease review your observations, correct any contradicted statements, and provide a verified answer."
+            )
+            # Caveated answer for when retries are exhausted
+            warning_box = (
+                "\n\n> [!WARNING]\n> **Verification Caveat:**\n"
+                + "\n".join(f"> - {c}" for c in contradictions)
+            )
+            caveated_answer = answer_clean + warning_box
+            return False, feedback_msg, caveated_answer
+
+        # No direct contradictions; append minor truncation caveats if applicable
+        if caveats:
+            disclaimer = "\n\n> [!NOTE]\n" + "\n".join(f"> {c}" for c in caveats)
+            return True, None, answer_clean + disclaimer
+
+        return True, None, answer_clean
 
     def _verify_absence_claim(self, answer: str, result: QALoopResult) -> bool:
         """
         Enforcement gate: absence claims must be backed by actual retrieval evidence.
 
-        Returns True if:
-        - Answer does NOT claim absence, OR
-        - Answer claims absence AND retrieval result data genuinely supports it
-
-        Returns False if:
-        - Answer claims absence but retrieval found contradicting evidence, OR
-        - Answer claims absence but no retrieval was performed, OR
-        - Answer claims absence but retrieval result data contradicts the claim
+        Preserves existing API contract for backward compatibility.
+        Delegates to _retrieval_evidence_supports_absence.
         """
         if not self._is_absence_claim(answer):
-            # Not an absence claim, pass through
             return True
 
-        # This is an absence claim; validate with retrieval evidence
-        if self._retrieval_evidence_supports_absence(result):
-            # Absence claim is backed by actual retrieval evidence (results were empty)
-            return True
-
-        # Absence claim NOT supported by evidence
-        logger.warning(f"[VerificationGate] Absence claim without supporting retrieval evidence: {answer[:100]}...")
-        return False
+        supported, _ = self._retrieval_evidence_supports_absence(result, answer)
+        if not supported:
+            logger.warning(f"[VerificationGate] Absence claim without supporting retrieval evidence: {answer[:100]}...")
+            return False
+        return True
 
     def _format_tool_observation(
         self, tool_name: str, observation: ToolObservation, data: Any

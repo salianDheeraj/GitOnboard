@@ -58,12 +58,19 @@ class Settings(BaseSettings):
     local_frontend_url: str = "http://localhost:3000"
     prod_frontend_url: str = ""
 
-    # Azure Blob Storage / Azurite
+    # Azure Blob Storage / Azurite (LOCAL)
     azure_storage_connection_string: str = ""
     azure_storage_account_name: str = "devstoreaccount1"
     azure_storage_account_key: str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
     azure_storage_container: str = "gitonboard-repos"
     azure_storage_endpoint: str = "http://azurite:10000/devstoreaccount1"
+
+    # Azure Blob Storage (PROD)
+    prod_azure_storage_connection_string: str = ""
+    prod_azure_storage_account_name: str = ""
+    prod_azure_storage_account_key: str = ""
+    prod_azure_storage_endpoint: str = ""
+    prod_azure_storage_container: str = "gitonboard-repos"
 
     # Terminal Model Routing Configuration
     # Intent + chat use the lightweight instruct model (fast, low memory)
@@ -123,6 +130,8 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        if self.deployment_type == "TEST":
+            return "sqlite+pysqlite:///:memory:"
         if self.deployment_type == "PROD" and self.prod_database_url.strip():
             return self.prod_database_url
         return self.local_database_url
@@ -139,5 +148,35 @@ class Settings(BaseSettings):
         if self.deployment_type == "PROD":
             return self.model_prod_max_tokens
         return self.model_local_max_tokens
+
+    @property
+    def effective_azure_storage_connection_string(self) -> str:
+        if self.deployment_type == "PROD" and self.prod_azure_storage_connection_string.strip():
+            return self.prod_azure_storage_connection_string.strip()
+        return self.azure_storage_connection_string.strip()
+
+    @property
+    def effective_azure_storage_account_name(self) -> str:
+        if self.deployment_type == "PROD" and self.prod_azure_storage_account_name.strip():
+            return self.prod_azure_storage_account_name.strip()
+        return self.azure_storage_account_name.strip()
+
+    @property
+    def effective_azure_storage_account_key(self) -> str:
+        if self.deployment_type == "PROD" and self.prod_azure_storage_account_key.strip():
+            return self.prod_azure_storage_account_key.strip()
+        return self.azure_storage_account_key.strip()
+
+    @property
+    def effective_azure_storage_endpoint(self) -> str:
+        if self.deployment_type == "PROD" and self.prod_azure_storage_endpoint.strip():
+            return self.prod_azure_storage_endpoint.strip()
+        return self.azure_storage_endpoint.strip()
+
+    @property
+    def effective_azure_storage_container(self) -> str:
+        if self.deployment_type == "PROD" and self.prod_azure_storage_container.strip():
+            return self.prod_azure_storage_container.strip()
+        return self.azure_storage_container.strip()
 
 settings = Settings()

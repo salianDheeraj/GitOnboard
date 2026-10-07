@@ -6,9 +6,9 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.config import settings
 
-# Database URL from environment or config
-raw_url = os.getenv("DATABASE_URL") or settings.database_url
-is_test_mode = os.getenv("DEPLOYMENT_TYPE") == "TEST"
+# Database URL from config (which dynamically selects prod_database_url or local_database_url based on DEPLOYMENT_TYPE)
+raw_url = settings.database_url or os.getenv("DATABASE_URL")
+is_test_mode = os.getenv("DEPLOYMENT_TYPE") == "TEST" or settings.deployment_type == "TEST"
 
 if not raw_url or not raw_url.strip():
     raise ValueError("DATABASE_URL must be configured")

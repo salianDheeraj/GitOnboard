@@ -118,13 +118,13 @@ class ToolDispatchTable:
         base_tools = [
             ToolSpec(
                 "read_file",
-                "Read a portion of a source file. Returns line-numbered content. Authoritative tool for inspecting actual code implementation. Always specify start_line and end_line for a focused slice (e.g., 50-150 lines around search matches) to inspect implementation without exceeding context.",
+                "Read a portion of a source file. Returns line-numbered content. Authoritative tool for inspecting actual code implementation. Always specify start_line and end_line for a focused slice (safe read limit is 250 lines max per request; requests exceeding this are safely clamped). For large files (>200 lines), call get_file_outline first to pinpoint exact symbol lines.",
                 {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "File path relative to repo root"},
                         "start_line": {"type": "integer", "description": "Starting line number (default 1)"},
-                        "end_line": {"type": "integer", "description": "Ending line number. Keep slice focused to inspect implementation without exceeding context."},
+                        "end_line": {"type": "integer", "description": "Ending line number. Safe read limit is 250 lines max per request."},
                         "context_lines": {
                             "type": "integer",
                             "description": "Optional number of surrounding context lines to include before start_line and after end_line (default 0, max 25).",

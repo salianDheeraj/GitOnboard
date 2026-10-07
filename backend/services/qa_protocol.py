@@ -117,7 +117,8 @@ class QAProtocolAdapter:
 
         "read_file": """**read_file**: Authoritative tool for inspecting actual code implementation and verifying behavior.
   - Primary tool for understanding HOW something works.
-  - Always specify start_line and end_line covering the relevant block (e.g., start_line=120, end_line=180).
+  - Always specify start_line and end_line covering the relevant block (safe limit is 250 lines max per call).
+  - For large files (>200 lines), run get_file_outline first to find exact symbol line ranges instead of reading blindly.
   - Use optional context_lines to include surrounding context without making extra calls.
   - Never make implementation claims from search or graph results alone without reading source code.""",
     }
@@ -681,3 +682,97 @@ If query_rim returns NO_STATIC_EDGE_FOUND, dynamic code may be present; use sear
                 "action": "malformed",
                 "error": f"unknown action: {action}",
             }
+
+    def parse_final_synthesis(self, text: str) -> str:
+        """
+        Dedicated parsing path for final synthesis turns (e.g. after tool budget exhaustion).
+
+        Preserves pure markdown and plain-text answers directly, while:
+        1. Extracting answer field if wrapped in JSON {"action": "final_answer", "answer": "..."}
+        2. Extracting answer parameter if wrapped in Hermes XML <invoke name="final_answer">...
+        3. Stripping any trailing/leading raw unexecuted tool call syntax (<tool_call> or {"action": "tool_call"}),
+           ensuring tool calls are NOT leaked as user answers.
+        4. Recovering usable text preceding truncated tool call envelopes or syntax.
+        5. Returning empty string if the response contains ONLY an unexecuted tool call or no answer text.
+        """
+        import re
+        import json
+
+        if not text or not text.strip():
+            return ""
+
+        raw_trimmed = text.strip()
+
+        # 1. Check if the entire response is a JSON object
+        # Try structured JSON parse first
+        try:
+            parsed_json = json.loads(raw_trimmed)
+            if isinstance(parsed_json, dict):
+                action = parsed_json.get("action", "").lower()
+                if action == "final_answer" and "answer" in parsed_json:
+                    return str(parsed_json["answer"]).strip()
+                if action == "tool_call" or "tool_name" in parsed_json or action in {
+                    "read_file", "search_code", "search_repository", "get_file_outline", "query_rim", "get_tree"
+                }:
+                    # Response is strictly a tool call JSON with no synthesis text
+                    return ""
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # 2. Check for Hermes XML <tool_call> structure
+        # If there's an explicit <invoke name="final_answer">, extract the answer parameter
+        final_answer_match = re.search(
+            r'<invoke\s+name=["\']final_answer["\']>(.*?)</invoke>',
+            raw_trimmed,
+            re.DOTALL
+        )
+        if final_answer_match:
+            param_match = re.search(
+                r'<parameter\s+name=["\']answer["\']>(.*?)</parameter>',
+                final_answer_match.group(1),
+                re.DOTALL
+            )
+            if param_match:
+                extracted = param_match.group(1).strip()
+                if extracted:
+                    return extracted
+
+        # 3. Strip any complete <tool_call>...</tool_call> blocks
+        cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', raw_trimmed, flags=re.DOTALL)
+
+        # Also strip incomplete/truncated <tool_call> blocks (e.g., `<tool_call>...` until end of string)
+        cleaned = re.sub(r'<tool_call>.*$', '', cleaned, flags=re.DOTALL)
+
+        # Strip orphan tags if any remain
+        cleaned = re.sub(r'</?tool_call>', '', cleaned)
+        cleaned = re.sub(r'<invoke[^>]*>.*?</invoke>', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'<invoke[^>]*>.*$', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'</?invoke[^>]*>', '', cleaned)
+        cleaned = re.sub(r'<parameter[^>]*>.*?</parameter>', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'<parameter[^>]*>.*$', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'</?parameter[^>]*>', '', cleaned)
+
+        # 4. Strip JSON tool calls if embedded in text (e.g., text preceding or following {"action": "tool_call", ...})
+        for match in re.finditer(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|query_rim|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
+            cleaned = cleaned.replace(match.group(0), "")
+
+        # Also strip truncated JSON tool calls at the end of the response: e.g., '{"action": "tool_call", ...'
+        cleaned = re.sub(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|query_rim|get_tree)".*$', '', cleaned, flags=re.DOTALL)
+
+        # Check for embedded JSON final_answer in markdown text: {"action": "final_answer", "answer": "..."}
+        fa_json_match = re.search(r'\{[^{}]*"action"\s*:\s*"final_answer"\s*,\s*"answer"\s*:\s*"(.*?)"\s*\}', cleaned, re.DOTALL)
+        if fa_json_match:
+            try:
+                # Parse decoded string value
+                extracted_ans = json.loads(f'"{fa_json_match.group(1)}"')
+                if extracted_ans.strip():
+                    return extracted_ans.strip()
+            except Exception:
+                pass
+
+        # 5. Normalize whitespace and formatting
+        cleaned = re.sub(r'^(\d+\.)\s*\n\s*', r'\1 ', cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r'\n\s*\n', '\n\n', cleaned).strip()
+
+        return cleaned
+
