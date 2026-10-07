@@ -932,7 +932,14 @@ def execute_plan(
 
         # 3. Determine Repository Revision
         repo_revision = "main"
-        if repo_name_resolved:
+        if agent_run_id:
+            from backend.models.implementation import AgentRun
+            agent_run = db.query(AgentRun).filter(AgentRun.id == agent_run_id).first()
+            if agent_run:
+                from backend.agent.engineering_agent import EngineeringAgent
+                eng_agent = EngineeringAgent()
+                repo_revision = eng_agent.get_repository_revision(agent_run.repository_id, agent_run.worktree_path)
+        elif repo_name_resolved:
             from backend.models.repository import Repository
             repo_record = db.query(Repository).filter(
                 (Repository.url.ilike(f"%/{repo_name_resolved}%")) | 
