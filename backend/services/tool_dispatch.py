@@ -1,8 +1,8 @@
 """
-Tool Dispatch Table: wraps RepositoryToolLayer and query_rim tool.
+Tool Dispatch Table: wraps RepositoryToolLayer and get_code_relationships tool.
 
 Routes tool calls from the LLM to the appropriate backend, catches all exceptions.
-Exposes different tool sets for baseline (no RIM) vs. RIM side (with query_rim).
+Exposes different tool sets for baseline (no RIM) vs. RIM side (with get_code_relationships).
 """
 
 import logging
@@ -106,7 +106,7 @@ class ToolDispatchTable:
           - All baseline tools +
           - get_file_outline: Outline symbols in file (recommended for files >200 lines)
           - search_code: Raw text/regex search (configs, Dockerfiles, exact patterns)
-          - query_rim: Bounded graph relationships (CALLS, IMPORTS, INHERITS, etc.)
+          - get_code_relationships: Bounded graph relationships (CALLS, IMPORTS, INHERITS, etc.)
 
         Args:
             include_rim: if True, include advanced code navigation + RIM tool
@@ -118,13 +118,14 @@ class ToolDispatchTable:
         base_tools = [
             ToolSpec(
                 "read_file",
-                "Read a portion of a source file. Returns line-numbered content. Authoritative tool for inspecting actual code implementation. Always specify start_line and end_line for a focused slice (safe read limit is 250 lines max per request; requests exceeding this are safely clamped). For large files (>200 lines), call get_file_outline first to pinpoint exact symbol lines.",
+                "Read a portion of a source file or an entire function/symbol. Returns line-numbered content. Authoritative tool for inspecting actual code implementation. Specify start_line and end_line for a slice (up to 250 lines returned at once), or specify 'symbol' to inspect a specific function/class directly.",
                 {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "File path relative to repo root"},
                         "start_line": {"type": "integer", "description": "Starting line number (default 1)"},
-                        "end_line": {"type": "integer", "description": "Ending line number. Safe read limit is 250 lines max per request."},
+                        "end_line": {"type": "integer", "description": "Ending line number (safe read limit is 250 lines max per request)."},
+                        "symbol": {"type": "string", "description": "Optional name of function, class, or method to read directly."},
                         "context_lines": {
                             "type": "integer",
                             "description": "Optional number of surrounding context lines to include before start_line and after end_line (default 0, max 25).",
@@ -253,7 +254,7 @@ class ToolDispatchTable:
 
         CRITICAL: Enforces tool restrictions based on mode (baseline vs RIM).
         Baseline can only access: read_file, search_repository, get_tree
-        RIM can access: read_file, search_repository, get_tree, get_file_outline, search_code, get_code_relationships (or legacy query_rim internally)
+        RIM can access: read_file, search_repository, get_tree, get_file_outline, search_code, get_code_relationships
         """
         tool_call_id = f"{tool_name}:{hash(str(arguments))}"
 
@@ -261,7 +262,7 @@ class ToolDispatchTable:
         allowed_baseline_tools = {"read_file", "search_repository", "get_tree"}
         allowed_rim_tools = {
             "read_file", "search_repository", "get_tree",
-            "get_file_outline", "search_code", "get_code_relationships", "query_rim"
+            "get_file_outline", "search_code", "get_code_relationships"
         }
 
         allowed_tools = allowed_rim_tools if self.include_rim else allowed_baseline_tools
@@ -302,8 +303,8 @@ class ToolDispatchTable:
                 return self._handle_search_code(arguments, tool_call_id)
             elif tool_name == "get_tree":
                 return self._handle_get_tree(arguments, tool_call_id)
-            elif tool_name in ("get_code_relationships", "query_rim"):
-                return self._handle_query_rim(arguments, tool_call_id, reported_tool_name=tool_name)
+            elif tool_name == "get_code_relationships":
+                return self._handle_get_code_relationships(arguments, tool_call_id)
             else:
                 return ToolObservation(
                     tool_call_id=tool_call_id,
@@ -340,6 +341,8 @@ class ToolDispatchTable:
             )
 
         kwargs: Dict[str, Any] = {"context_lines": context_lines}
+        if "symbol" in arguments:
+            kwargs["symbol"] = arguments["symbol"]
         if max_content_tokens is not None:
             kwargs["max_content_tokens"] = max_content_tokens
             kwargs["control_reservation_tokens"] = control_reservation_tokens
@@ -559,12 +562,12 @@ class ToolDispatchTable:
                 error={"type": "tree_error", "message": str(e)},
             )
 
-    def _handle_query_rim(self, arguments: Dict[str, Any], tool_call_id: str, reported_tool_name: str = "get_code_relationships") -> ToolObservation:
-        """Handle get_code_relationships / query_rim tool call (RIM side only)."""
+    def _handle_get_code_relationships(self, arguments: Dict[str, Any], tool_call_id: str) -> ToolObservation:
+        """Handle get_code_relationships tool call (RIM side only)."""
         if not self.graph_traverser or not self.target_resolver:
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=False,
-                error={"type": "unavailable", "message": f"{reported_tool_name} not available on this side"},
+                tool_call_id=tool_call_id, tool_name="get_code_relationships", success=False,
+                error={"type": "unavailable", "message": "get_code_relationships not available on this side"},
             )
 
         entity_name = str(arguments.get("entity_name", "")).strip()
@@ -602,9 +605,9 @@ class ToolDispatchTable:
             # Resolve entity
             target = self.target_resolver.resolve(entity_name)
             if not target:
-                logger.debug(f"[{reported_tool_name}] Entity '{entity_name}' not found in repository index")
+                logger.debug(f"[get_code_relationships] Entity '{entity_name}' not found in repository index")
                 return ToolObservation(
-                    tool_call_id=tool_call_id, tool_name=reported_tool_name, success=True,
+                    tool_call_id=tool_call_id, tool_name="get_code_relationships", success=True,
                     data={
                         "found": False,
                         "resolution": "ENTITY_NOT_FOUND",
@@ -616,7 +619,7 @@ class ToolDispatchTable:
                     },
                 )
 
-            logger.debug(f"[{reported_tool_name}] Resolved '{entity_name}' to {type(target).__name__}")
+            logger.debug(f"[get_code_relationships] Resolved '{entity_name}' to {type(target).__name__}")
 
             if hasattr(self.graph_traverser, "traverse_bounded"):
                 result = self.graph_traverser.traverse_bounded(
@@ -639,9 +642,9 @@ class ToolDispatchTable:
                 result = self.graph_traverser.traverse(intent, target)
 
             if not result.related_entities:
-                logger.debug(f"[{reported_tool_name}] No related entities for '{entity_name}' ({relationship_type}, {direction})")
+                logger.debug(f"[get_code_relationships] No related entities for '{entity_name}' ({relationship_type}, {direction})")
                 return ToolObservation(
-                    tool_call_id=tool_call_id, tool_name=reported_tool_name, success=True,
+                    tool_call_id=tool_call_id, tool_name="get_code_relationships", success=True,
                     data={
                         "found": False,
                         "resolution": "NO_STATIC_EDGE_FOUND",
@@ -675,9 +678,9 @@ class ToolDispatchTable:
             target_loc = getattr(target, "path", target.file.path if getattr(target, "file", None) else "")
             target_line = getattr(target, "line_start", 1)
 
-            logger.debug(f"[{reported_tool_name}] Found {len(related_list)} related entities for '{entity_name}'")
+            logger.debug(f"[get_code_relationships] Found {len(related_list)} related entities for '{entity_name}'")
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=True,
+                tool_call_id=tool_call_id, tool_name="get_code_relationships", success=True,
                 data={
                     "found": True,
                     "resolution": "STATIC_CONFIRMED",
@@ -696,9 +699,9 @@ class ToolDispatchTable:
             )
 
         except Exception as e:
-            logger.error(f"{reported_tool_name} error: {e}", exc_info=True)
+            logger.error(f"get_code_relationships error: {e}", exc_info=True)
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=False,
+                tool_call_id=tool_call_id, tool_name="get_code_relationships", success=False,
                 error={"type": "traversal_error", "message": str(e)},
             )
 

@@ -108,33 +108,95 @@ def derive_provider_budget_profile(
     }
 
 
+def extract_read_file_metadata(content: str) -> Optional[Dict[str, Any]]:
+    """Extract path and optional line ranges from tool observation content or assistant tool calls."""
+    if not content:
+        return None
+
+    # 1. Standard formatted read_file observation:
+    # "[read_file] path/to/file.js lines 25-158: 10604 chars (total: 158)"
+    # or "[read_file] path/to/file.js lines 1-13:"
+    m = re.search(r"\[read_file\]\s+([^\s:]+)(?:\s+lines\s+(\d+)-(\d+))?", content)
+    if m:
+        path = m.group(1).strip()
+        start = int(m.group(2)) if m.group(2) else None
+        end = int(m.group(3)) if m.group(3) else None
+        return {"path": path, "start_line": start, "end_line": end}
+
+    # 2. Assistant tool call string or pythonic syntax:
+    # "read_file(path='app/controllers/trial.js', start_line=1, end_line=13)"
+    m = re.search(r"read_file\(\s*path=[\x27\x22]([^\x27\x22]+)[\x27\x22]", content)
+    if m:
+        path = m.group(1).strip()
+        s_m = re.search(r"start_line=(\d+)", content)
+        e_m = re.search(r"end_line=(\d+)", content)
+        start = int(s_m.group(1)) if s_m else None
+        end = int(e_m.group(1)) if e_m else None
+        return {"path": path, "start_line": start, "end_line": end}
+
+    # 3. Legacy phrase: "Showing 50 lines of ARCHITECTURE.md: line 1 to 50"
+    m = re.search(r"lines of\s+([^\s:]+)(?::\s*line\s+(\d+)\s+to\s+(\d+))?", content)
+    if m:
+        path = m.group(1).strip()
+        start = int(m.group(2)) if m.group(2) else None
+        end = int(m.group(3)) if m.group(3) else None
+        return {"path": path, "start_line": start, "end_line": end}
+
+    # 4. JSON arguments snippet
+    m = re.search(r'["\']path["\']\s*:\s*["\']([^"\']+)["\']', content)
+    if m and ("read_file" in content or "lines" in content):
+        path = m.group(1).strip()
+        s_m = re.search(r'["\']start_line["\']\s*:\s*(\d+)', content)
+        e_m = re.search(r'["\']end_line["\']\s*:\s*(\d+)', content)
+        start = int(s_m.group(1)) if s_m else None
+        end = int(e_m.group(1)) if e_m else None
+        return {"path": path, "start_line": start, "end_line": end}
+
+    return None
+
+
 def compact_messages_deterministically(
     messages: List[Dict[str, Any]],
     target_tokens: int,
 ) -> List[Dict[str, Any]]:
     """
-    Deterministic, rule-based context compaction. ZERO LLM summarization.
-    Pass 1: Deduplicate redundant tool reads for the same path.
-    Pass 2: Compact older tool observations (>1 turn old) to structural outlines.
-    Pass 3: Truncate oversized recent observation bodies.
+    Deterministic, rule-based working context compaction. ZERO LLM summarization.
+    Keeps raw evidence separately in QALoopTurn / Evidence Store.
+
+    Pass 1: Deduplicate redundant file reads for the same path by tracking inspected line ranges.
+            Earlier slices of the same file are compacted to high-level coverage references.
+    Pass 2: Compact older tool observations (>1 turn old) to structural outlines or summaries.
+    Pass 3: Truncate oversized recent observation bodies to stay within target_tokens.
     """
     if len(messages) <= 1:
         return messages
 
     user_query_msg = messages[0]
-    conversation = list(messages[1:])
+    conversation = [dict(m) for m in messages[1:]]
 
-    # Pass 1: Deduplicate file reads (keep latest read per file path)
+    # Pass 1: Deduplicate file reads (keep latest read per file path, summarize earlier ranges)
+    # Map path -> list of line ranges seen across all reads to preserve coverage knowledge
+    file_coverage: Dict[str, List[str]] = {}
+    for msg in conversation:
+        content = msg.get("content", "")
+        meta = extract_read_file_metadata(content)
+        if meta and meta["path"]:
+            path = meta["path"]
+            rng = f"{meta['start_line']}-{meta['end_line']}" if meta["start_line"] and meta["end_line"] else "inspected"
+            file_coverage.setdefault(path, []).append(rng)
+
     seen_paths = set()
     for idx in range(len(conversation) - 1, -1, -1):
         msg = conversation[idx]
         content = msg.get("content", "")
-        # Identify file read observation or assistant read_file call
-        match = re.search(r"read_file\(path=['\"]([^'\"]+)['\"]", content) or re.search(r"lines of ([^\s:]+)", content)
-        if match:
-            path = match.group(1)
+        meta = extract_read_file_metadata(content)
+        if meta and meta["path"]:
+            path = meta["path"]
             if path in seen_paths:
-                msg["content"] = f"[Deduplicated older observation for '{path}']"
+                ranges_str = ", ".join(file_coverage.get(path, []))
+                lines = content.splitlines()
+                header = lines[0] if lines else f"[read_file] {path}"
+                msg["content"] = f"{header}\n... [Deduplicated older observation for '{path}'; covered ranges: {ranges_str}] ..."
             else:
                 seen_paths.add(path)
 
@@ -149,7 +211,7 @@ def compact_messages_deterministically(
             header = lines[0] if lines else ""
             msg["content"] = f"{header}\n... [Older observation compacted to outline ({len(lines)} lines)] ..."
 
-    # Pass 3: If still heavy, compact non-deduplicated earliest messages
+    # Pass 3: If still heavy, compact non-deduplicated earlier messages
     for idx in range(len(conversation) - 1):
         msg = conversation[idx]
         content = msg.get("content", "")

@@ -481,16 +481,22 @@ async def analyze_repository_stream(
             print(f"[stream_generator] Starting event drain loop, analysis_task.done()={loop_task.done()}")
 
             try:
+                last_keepalive = time.time()
                 while not loop_task.done():
                     try:
-                        # Check for queued events (non-blocking with timeout to prevent stall)
+                        # Check for queued events with short timeout
                         try:
                             event = event_queue.get_nowait()
                         except asyncio.QueueEmpty:
-                            # No events, yield control briefly
-                            await asyncio.sleep(0.01)
+                            now = time.time()
+                            # Emit SSE keepalive comment every 15s to keep proxy/Undici socket and body alive
+                            if now - last_keepalive >= 15.0:
+                                last_keepalive = now
+                                yield ": keepalive\n\n"
+                            await asyncio.sleep(0.05)
                             continue
 
+                        last_keepalive = time.time()
                         try:
                             json_str = json.dumps(event)
                             events_yielded += 1
@@ -555,4 +561,12 @@ async def analyze_repository_stream(
             logger.error(f"Error in analyze_repository_stream: {e}", exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'content': format_error_message(e)})}\n\n"
 
-    return StreamingResponse(stream_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

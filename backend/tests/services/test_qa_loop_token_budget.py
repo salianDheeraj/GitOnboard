@@ -62,6 +62,26 @@ class TestQALoopTokenBudgeting:
         # Latest observation should be retained
         assert "Showing 50 lines of ARCHITECTURE.md: line 51 to 100" in compacted[4]["content"]
 
+    def test_deterministic_compaction_real_tool_format_and_coverage(self, qa_loop_instance):
+        """Verify compaction handles [read_file] path lines format and retains coverage ranges."""
+        messages = [
+            {"role": "user", "content": "How does trial work?"},
+            {"role": "assistant", "content": '{"action": "tool_call", "tool_name": "read_file", "arguments": {"path": "controllers/trial.js", "start_line": 1, "end_line": 13}}'},
+            {"role": "user", "content": "[read_file] controllers/trial.js lines 1-13: 566 chars (total: 158)\nconst jwt = require('jwt');\n" * 10},
+            {"role": "assistant", "content": '{"action": "tool_call", "tool_name": "read_file", "arguments": {"path": "controllers/trial.js", "start_line": 14, "end_line": 24}}'},
+            {"role": "user", "content": "[read_file] controllers/trial.js lines 14-24: 1075 chars (total: 158)\nconst fingerprint = ...\n" * 15},
+            {"role": "assistant", "content": '{"action": "tool_call", "tool_name": "read_file", "arguments": {"path": "controllers/trial.js", "start_line": 25, "end_line": 158}}'},
+            {"role": "user", "content": "[read_file] controllers/trial.js lines 25-158: 10604 chars (total: 158)\nexports.joinTrial = ...\n" * 50},
+        ]
+
+        compacted = qa_loop_instance._compact_messages_deterministically(messages, target_tokens=2000)
+        assert len(compacted) == len(messages)
+        # Earlier observations for controllers/trial.js should have deduplicated summary with coverage info
+        assert "[Deduplicated older observation for 'controllers/trial.js'" in compacted[2]["content"]
+        assert "1-13" in compacted[2]["content"]
+        # Latest observation (lines 25-158) should be preserved
+        assert "lines 25-158" in compacted[6]["content"]
+
     @pytest.mark.asyncio
     async def test_preflight_blocks_oversized_request_and_compacts(self, qa_loop_instance):
         """

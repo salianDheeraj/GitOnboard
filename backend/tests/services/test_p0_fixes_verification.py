@@ -146,10 +146,10 @@ class TestP01GraphAwareRouting:
 class TestP02GraphFileCoordination:
     """P0-2: Verify that successful query_rim observation provides actionable read_file guidance."""
 
-    def test_query_rim_observation_includes_actionable_read_file_recommendation(self, qa_loop_instance):
+    def test_get_code_relationships_observation_includes_actionable_read_file_recommendation(self, qa_loop_instance):
         obs = ToolObservation(
             tool_call_id="call-1",
-            tool_name="query_rim",
+            tool_name="get_code_relationships",
             success=True,
             data={
                 "found": True,
@@ -165,7 +165,7 @@ class TestP02GraphFileCoordination:
                 ],
             },
         )
-        formatted = qa_loop_instance._format_tool_observation("query_rim", obs, obs.data)
+        formatted = qa_loop_instance._format_tool_observation("get_code_relationships", obs, obs.data)
         assert "Actionable next step for verification:" in formatted
         assert "read_file(path='src/tokens.py', start_line=85, end_line=125)" in formatted
         assert "verify_token" in formatted
@@ -219,19 +219,139 @@ class TestP03StrongerAbsenceVerification:
         assert feedback is None
         assert "Verification Caveat" not in caveated
 
-
-class TestP04EvidenceSufficiencyAndTermination:
-    """P0-4: Verify evidence sufficiency detection and pre-turn limit validation."""
-
-    def test_evidence_sufficiency_detected_for_relational_question(self, qa_loop_instance):
+    def test_unsupported_positive_caller_claim_is_rejected(self, qa_loop_instance):
+        """Claim that 'routes/auth.js calls authenticateToken' is rejected if not supported by retrieved evidence."""
         result = QALoopResult(
             answer="",
             stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
             turns=[
                 QALoopTurn(
                     turn_index=1,
-                    tool_call={"tool_name": "query_rim", "arguments": {"entity_name": "auth"}},
-                    tool_observation={"tool_name": "query_rim", "success": True, "data": {"found": True}},
+                    tool_call={"tool_name": "search_code", "arguments": {"query": "auth"}},
+                    tool_observation={
+                        "tool_name": "search_code",
+                        "success": True,
+                        "data": [{"file": "routes/other.js", "snippet": "console.log('hello')"}],
+                    },
+                )
+            ],
+        )
+        answer = "routes/auth.js calls authenticateToken during request handling."
+        is_valid, feedback, caveated = qa_loop_instance._validate_final_answer_against_evidence(answer, result)
+        assert is_valid is False
+        assert "unsupported by retrieved evidence" in feedback
+        assert "routes/auth.js" in feedback
+        assert "authenticateToken" in feedback
+        assert "Verification Caveat" in caveated
+
+    def test_supported_positive_caller_claim_via_graph_is_accepted(self, qa_loop_instance):
+        """Claim that 'routes/auth.js calls authenticateToken' is accepted if graph confirmed it."""
+        result = QALoopResult(
+            answer="",
+            stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
+            turns=[
+                QALoopTurn(
+                    turn_index=1,
+                    tool_call={
+                        "tool_name": "get_code_relationships",
+                        "arguments": {"entity_name": "authenticateToken", "relationship_type": "CALLS", "direction": "REVERSE"},
+                    },
+                    tool_observation={
+                        "tool_name": "get_code_relationships",
+                        "success": True,
+                        "data": {
+                            "found": True,
+                            "target": {"name": "authenticateToken", "location": "middleware/auth.js"},
+                            "related": [
+                                {
+                                    "name": "loginHandler",
+                                    "location": "routes/auth.js",
+                                    "relationship_role": "caller",
+                                }
+                            ],
+                        },
+                    },
+                )
+            ],
+        )
+        answer = "routes/auth.js calls authenticateToken during login."
+        is_valid, feedback, caveated = qa_loop_instance._validate_final_answer_against_evidence(answer, result)
+        assert is_valid is True
+        assert feedback is None
+        assert "Verification Caveat" not in caveated
+
+    def test_supported_positive_caller_claim_via_read_file_is_accepted(self, qa_loop_instance):
+        """Claim that 'routes/auth.js calls authenticateToken' is accepted if routes/auth.js was read and contains the call."""
+        result = QALoopResult(
+            answer="",
+            stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
+            turns=[
+                QALoopTurn(
+                    turn_index=1,
+                    tool_call={"tool_name": "read_file", "arguments": {"path": "routes/auth.js"}},
+                    tool_observation={
+                        "tool_name": "read_file",
+                        "success": True,
+                        "data": {
+                            "path": "routes/auth.js",
+                            "raw_text": "router.post('/login', authenticateToken, (req, res) => { res.send('ok'); });",
+                        },
+                    },
+                )
+            ],
+        )
+        answer = "routes/auth.js calls authenticateToken when handling post requests."
+        is_valid, feedback, caveated = qa_loop_instance._validate_final_answer_against_evidence(answer, result)
+        assert is_valid is True
+        assert feedback is None
+        assert "Verification Caveat" not in caveated
+
+
+class TestP04EvidenceSufficiencyAndTermination:
+    """P0-4: Verify evidence sufficiency detection and pre-turn limit validation."""
+
+    def test_read_file_alone_not_sufficient_for_callers_question(self, qa_loop_instance):
+        """read_file(X) alone must NOT be sufficient for 'Who calls X?'."""
+        result = QALoopResult(
+            answer="",
+            stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
+            turns=[
+                QALoopTurn(
+                    turn_index=1,
+                    tool_call={"tool_name": "read_file", "arguments": {"path": "auth.py"}},
+                    tool_observation={
+                        "tool_name": "read_file",
+                        "success": True,
+                        "data": {"path": "auth.py", "raw_text": "def auth(): return True  # definition of target function"},
+                    },
+                ),
+            ],
+        )
+        is_sufficient, msg = qa_loop_instance.check_evidence_sufficiency("Who calls auth?", result)
+        assert is_sufficient is False
+        assert msg is None
+
+    def test_imports_not_sufficient_for_callers_question(self, qa_loop_instance):
+        """IMPORTS relationship evidence alone must NOT be sufficient for 'Who calls X?' (imports != callers)."""
+        result = QALoopResult(
+            answer="",
+            stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
+            turns=[
+                QALoopTurn(
+                    turn_index=1,
+                    tool_call={
+                        "tool_name": "get_code_relationships",
+                        "arguments": {"entity_name": "auth", "relationship_type": "IMPORTS", "direction": "REVERSE"},
+                    },
+                    tool_observation={
+                        "tool_name": "get_code_relationships",
+                        "success": True,
+                        "data": {
+                            "found": True,
+                            "resolution": "STATIC_CONFIRMED",
+                            "related": [{"name": "server.py", "relationship_role": "importer"}],
+                        },
+                    },
                 ),
                 QALoopTurn(
                     turn_index=2,
@@ -239,7 +359,35 @@ class TestP04EvidenceSufficiencyAndTermination:
                     tool_observation={
                         "tool_name": "read_file",
                         "success": True,
-                        "data": {"path": "auth.py", "raw_text": "def auth(): return True  # implementation with enough characters to be valid"},
+                        "data": {"path": "auth.py", "raw_text": "def auth(): return True  # definition of target function"},
+                    },
+                ),
+            ],
+        )
+        is_sufficient, msg = qa_loop_instance.check_evidence_sufficiency("Who calls auth?", result)
+        assert is_sufficient is False
+        assert msg is None
+
+    def test_calls_relationship_sufficient_for_callers_question(self, qa_loop_instance):
+        """CALLS relationship evidence is sufficient for 'Who calls X?'."""
+        result = QALoopResult(
+            answer="",
+            stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
+            turns=[
+                QALoopTurn(
+                    turn_index=1,
+                    tool_call={
+                        "tool_name": "get_code_relationships",
+                        "arguments": {"entity_name": "auth", "relationship_type": "CALLS", "direction": "REVERSE"},
+                    },
+                    tool_observation={
+                        "tool_name": "get_code_relationships",
+                        "success": True,
+                        "data": {
+                            "found": True,
+                            "resolution": "STATIC_CONFIRMED",
+                            "related": [{"name": "loginHandler", "relationship_role": "caller", "location": "server.py", "line_number": 42}],
+                        },
                     },
                 ),
             ],
@@ -248,21 +396,85 @@ class TestP04EvidenceSufficiencyAndTermination:
         assert is_sufficient is True
         assert "[EVIDENCE SUFFICIENT]" in msg
 
-    def test_insufficient_evidence_when_read_missing(self, qa_loop_instance):
+    def test_calls_relationship_with_caller_file_read_sufficient(self, qa_loop_instance):
+        """CALLS relationship plus reading caller file is sufficient."""
         result = QALoopResult(
             answer="",
             stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
             turns=[
                 QALoopTurn(
                     turn_index=1,
-                    tool_call={"tool_name": "query_rim", "arguments": {"entity_name": "auth"}},
-                    tool_observation={"tool_name": "query_rim", "success": True, "data": {"found": True}},
-                )
+                    tool_call={
+                        "tool_name": "get_code_relationships",
+                        "arguments": {"entity_name": "auth", "relationship_type": "CALLS", "direction": "REVERSE"},
+                    },
+                    tool_observation={
+                        "tool_name": "get_code_relationships",
+                        "success": True,
+                        "data": {
+                            "found": True,
+                            "related": [{"name": "loginHandler", "relationship_role": "caller", "location": "server.py", "line_number": 42}],
+                        },
+                    },
+                ),
+                QALoopTurn(
+                    turn_index=2,
+                    tool_call={"tool_name": "read_file", "arguments": {"path": "server.py"}},
+                    tool_observation={
+                        "tool_name": "read_file",
+                        "success": True,
+                        "data": {"path": "server.py", "raw_text": "def loginHandler(): auth()  # invocations inside caller"},
+                    },
+                ),
             ],
         )
         is_sufficient, msg = qa_loop_instance.check_evidence_sufficiency("Who calls auth?", result)
-        assert is_sufficient is False
-        assert msg is None
+        assert is_sufficient is True
+        assert "[EVIDENCE SUFFICIENT]" in msg
+
+    def test_functional_question_accepts_target_read(self, qa_loop_instance):
+        """Target implementation read_file is sufficient for functional/explanation questions."""
+        result = QALoopResult(
+            answer="",
+            stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
+            turns=[
+                QALoopTurn(
+                    turn_index=1,
+                    tool_call={"tool_name": "read_file", "arguments": {"path": "auth.py"}},
+                    tool_observation={
+                        "tool_name": "read_file",
+                        "success": True,
+                        "data": {"path": "auth.py", "raw_text": "def auth():\n    return verify_jwt_token(request)\n"},
+                    },
+                ),
+            ],
+        )
+        is_sufficient, msg = qa_loop_instance.check_evidence_sufficiency("What does auth do?", result)
+        assert is_sufficient is True
+        assert "[EVIDENCE SUFFICIENT]" in msg
+
+    def test_missing_evidence_for_callers_identifies_call_relationship(self, qa_loop_instance):
+        """Missing evidence diagnosis for 'Who calls X?' identifies missing CALLS relationship."""
+        from backend.services.qa_validation import identify_missing_evidence
+        result = QALoopResult(
+            answer="",
+            stop_reason=StopReason.COMPLETED_FOR_VERIFICATION,
+            turns=[
+                QALoopTurn(
+                    turn_index=1,
+                    tool_call={"tool_name": "read_file", "arguments": {"path": "auth.py"}},
+                    tool_observation={
+                        "tool_name": "read_file",
+                        "success": True,
+                        "data": {"path": "auth.py", "raw_text": "def auth(): pass"},
+                    },
+                )
+            ],
+        )
+        guidance = identify_missing_evidence("Who calls auth?", result, "read_file", {"path": "auth.py"})
+        assert "Missing evidence: callers relationship" in guidance
+        assert "get_code_relationships" in guidance
+        assert "CALLS" in guidance
 
     @pytest.mark.asyncio
     async def test_pre_turn_limit_exit_runs_fact_validation_with_caveats(self, qa_loop_instance):

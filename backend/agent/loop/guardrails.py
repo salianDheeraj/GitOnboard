@@ -41,6 +41,99 @@ class AgentState:
         self.duplicate_attempts: List[Dict[str, Any]] = []
         self.evidence_sufficient: bool = False
         self.answer_ready: bool = False
+        # File read coverage tracking: canonical_path -> list of (start_line, end_line)
+        self.file_read_ranges: Dict[str, List[Tuple[int, int]]] = {}
+        # File total lines: canonical_path -> total_lines
+        self.file_total_lines: Dict[str, int] = {}
+
+    def _normalize_file_path(self, path: str) -> str:
+        """Normalizes file path for canonical coverage matching."""
+        if not path:
+            return ""
+        return path.replace("\\", "/").strip("/").lower()
+
+    def record_read_range(self, path: str, start_line: int, end_line: int, total_lines: Optional[int] = None) -> None:
+        """Records a successfully inspected line interval and updates file line totals."""
+        clean_path = self._normalize_file_path(path)
+        if not clean_path or start_line <= 0 or end_line < start_line:
+            return
+
+        if total_lines and total_lines > 0:
+            self.file_total_lines[clean_path] = total_lines
+
+        existing = self.file_read_ranges.get(clean_path, [])
+        existing.append((start_line, end_line))
+        # Merge overlapping / contiguous intervals
+        existing.sort(key=lambda x: x[0])
+        merged: List[Tuple[int, int]] = []
+        for s, e in existing:
+            if not merged:
+                merged.append((s, e))
+            else:
+                last_s, last_e = merged[-1]
+                # Contiguous or overlapping: [1, 25] and [26, 46] merge to [1, 46]
+                if s <= last_e + 1:
+                    merged[-1] = (last_s, max(last_e, e))
+                else:
+                    merged.append((s, e))
+        self.file_read_ranges[clean_path] = merged
+
+    def get_read_ranges_summary(self, path: str) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], Optional[int]]:
+        """
+        Returns (read_intervals, unread_intervals, total_lines) for a given file path.
+        """
+        clean_path = self._normalize_file_path(path)
+        reads = self.file_read_ranges.get(clean_path, [])
+        total = self.file_total_lines.get(clean_path)
+
+        if not reads:
+            unreads = [(1, total)] if total and total > 0 else []
+            return [], unreads, total
+
+        if not total or total <= 0:
+            # If total_lines is unknown, last read interval end defines current known boundary
+            return reads, [], total
+
+        # Compute gaps in [1, total]
+        unreads: List[Tuple[int, int]] = []
+        curr = 1
+        for s, e in reads:
+            if s > curr:
+                unreads.append((curr, min(s - 1, total)))
+            curr = max(curr, e + 1)
+        if curr <= total:
+            unreads.append((curr, total))
+
+        return reads, unreads, total
+
+    def get_unread_slice_for_request(self, path: str, req_start: int, req_end: int) -> Optional[Tuple[int, int]]:
+        """
+        Calculates the first unread interval within a requested [req_start, req_end] range.
+        If the entire requested range is already covered, returns None.
+        If partially covered, returns the adjusted (start_line, end_line) of the unread portion.
+        """
+        clean_path = self._normalize_file_path(path)
+        reads = self.file_read_ranges.get(clean_path, [])
+        if not reads:
+            return (req_start, req_end)
+
+        # Check if req_start is inside any read interval
+        for s, e in reads:
+            if s <= req_start <= e:
+                # req_start is already read. Does the unread portion continue past e?
+                if req_end > e:
+                    return (e + 1, req_end)
+                else:
+                    # Entire requested range is inside this interval!
+                    return None
+
+        # Check if requested range completely encloses a read interval or starts before it
+        for s, e in reads:
+            if req_start < s:
+                # Unread portion from req_start up to s - 1 (or req_end)
+                return (req_start, min(req_end, s - 1))
+
+        return (req_start, req_end)
 
     def record_tool_result(self, tool_name: str, arguments: Dict[str, Any], success: bool, data: Any = None, error: Any = None, turn_index: int = 0):
         entry = {
@@ -51,6 +144,17 @@ class AgentState:
         }
         self.completed_tools.append(entry)
         if success:
+            if tool_name == "read_file" and isinstance(data, dict):
+                p = data.get("path") or arguments.get("path")
+                s = data.get("start_line") or arguments.get("start_line", 1)
+                e = data.get("end_line") or arguments.get("end_line")
+                tot = data.get("total_lines")
+                if p and s is not None and e is not None:
+                    try:
+                        self.record_read_range(str(p), int(s), int(e), int(tot) if tot else None)
+                    except (ValueError, TypeError):
+                        pass
+
             evidence_summary = self._summarize_data(tool_name, data)
             self.successful_evidence.append({
                 "tool_name": tool_name,
@@ -163,6 +267,48 @@ class LoopGuardrails:
               - reason/feedback string for the model if it is a duplicate.
         """
         sig = self.get_tool_signature(tool_name, arguments)
+        # Overlap-aware check for read_file:
+        # If the requested range has already been fully read (even if exact arguments differ, e.g. [1, 50] inside [1, 96]),
+        # treat as duplicate request with full state feedback.
+        if tool_name == "read_file" and isinstance(arguments, dict) and arguments.get("path"):
+            path = str(arguments.get("path", ""))
+            r_start = arguments.get("start_line")
+            r_end = arguments.get("end_line")
+            if r_start is not None and r_end is not None:
+                try:
+                    s_int = int(r_start)
+                    e_int = int(r_end)
+                    unread_slice = self.state.get_unread_slice_for_request(path, s_int, e_int)
+                    if unread_slice is None:
+                        # Entire range is already inspected!
+                        self.state.record_duplicate(tool_name, arguments, self.turn_count)
+                        reads, unreads, total = self.state.get_read_ranges_summary(path)
+                        read_str = ", ".join(f"{s}-{e}" for s, e in reads) if reads else "none"
+                        unread_str = ", ".join(f"{s}-{e}" for s, e in unreads) if unreads else "all inspected"
+                        tot_str = f" of {total} lines" if total else ""
+
+                        if is_evidence_sufficient or self.state.evidence_sufficient or self.state.answer_ready:
+                            feedback = (
+                                f"[DUPLICATE TOOL CALL] [DUPLICATE REQUEST - EVIDENCE SUFFICIENT] [EVIDENCE SUFFICIENT]\n"
+                                f"This file/range has already been inspected.\n"
+                                f"File: {path} (lines {read_str}{tot_str}).\n"
+                                f"Sufficient evidence is already in your conversation history. "
+                                f"Do not call any more tools. Provide your final answer immediately using: "
+                                f'{{"action": "final_answer", "answer": "..."}}'
+                            )
+                        else:
+                            feedback = (
+                                f"[DUPLICATE TOOL CALL] [DUPLICATE REQUEST]\n"
+                                f"This file/range has already been inspected.\n"
+                                f"File: {path}\n"
+                                f"- Already inspected: lines {read_str}\n"
+                                f"- Still unread: lines {unread_str}\n"
+                                f"Do not repeat identical calls. Continue investigation using the unread range or investigate another relevant file."
+                            )
+                        return True, feedback
+                except (ValueError, TypeError):
+                    pass
+
         record = self.executed_tools.get(sig)
         if not record:
             return False, None
@@ -181,9 +327,36 @@ class LoopGuardrails:
         first_turn = record.get("turn_index", "earlier")
         self.state.record_duplicate(tool_name, arguments, self.turn_count)
 
+        if tool_name == "read_file" and isinstance(arguments, dict) and arguments.get("path"):
+            path = arguments.get("path", "")
+            reads, unreads, total = self.state.get_read_ranges_summary(path)
+            read_str = ", ".join(f"{s}-{e}" for s, e in reads) if reads else "none"
+            unread_str = ", ".join(f"{s}-{e}" for s, e in unreads) if unreads else "all inspected"
+            tot_str = f" of {total} lines" if total else ""
+
+            if is_evidence_sufficient or self.state.evidence_sufficient or self.state.answer_ready:
+                feedback = (
+                    f"[DUPLICATE TOOL CALL] [DUPLICATE REQUEST - EVIDENCE SUFFICIENT] [EVIDENCE SUFFICIENT]\n"
+                    f"You already called 'read_file' with these exact arguments in Turn {first_turn}.\n"
+                    f"Already inspected: {path} (lines {read_str}{tot_str}).\n"
+                    f"Sufficient evidence is already in your conversation history. "
+                    f"Do not call any more tools. Provide your final answer immediately using: "
+                    f'{{"action": "final_answer", "answer": "..."}}'
+                )
+            else:
+                feedback = (
+                    f"[DUPLICATE TOOL CALL] [DUPLICATE REQUEST]\n"
+                    f"You already called 'read_file' with these exact arguments in Turn {first_turn}.\n"
+                    f"File: {path}\n"
+                    f"- Already inspected: lines {read_str}\n"
+                    f"- Still unread: lines {unread_str}\n"
+                    f"Do not repeat identical calls. Continue investigation using the unread range or investigate another relevant file."
+                )
+            return True, feedback
+
         if is_evidence_sufficient or self.state.evidence_sufficient or self.state.answer_ready:
             feedback = (
-                f"[DUPLICATE TOOL CALL - EVIDENCE SUFFICIENT] You already called '{tool_name}' with these exact arguments in Turn {first_turn}, "
+                f"[DUPLICATE TOOL CALL - EVIDENCE SUFFICIENT] [EVIDENCE SUFFICIENT] You already called '{tool_name}' with these exact arguments in Turn {first_turn}, "
                 f"and sufficient evidence to answer the question is already in your conversation history. "
                 f"Do not call any more tools. Provide your final answer immediately using: "
                 f'{{"action": "final_answer", "answer": "..."}}'

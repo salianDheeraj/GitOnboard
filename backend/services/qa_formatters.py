@@ -53,7 +53,7 @@ def format_tool_observation(tool_name: str, observation: ToolObservation, data: 
         if actual_content:
             return summary + actual_content
         return summary
-    elif tool_name in ("get_code_relationships", "query_rim") and isinstance(data, dict):
+    elif tool_name == "get_code_relationships" and isinstance(data, dict):
         display_name = tool_name
         if not data.get("found"):
             resolution = data.get("resolution", "")

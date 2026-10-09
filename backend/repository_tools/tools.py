@@ -76,14 +76,16 @@ class RepositoryToolLayer:
         start_line: int = 1,
         end_line: Optional[int] = None,
         context_lines: int = 0,
+        symbol: Optional[str] = None,
         max_content_tokens: Optional[int] = None,
         control_reservation_tokens: int = 60,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """
-        Reads a slice of a file from Azure Blob Storage.
-        Requires analysis_id to be set. Constructs blob name from repo hash and path,
-        fetches from blob storage, and returns specified line range.
+        Reads a slice of a file from Azure Blob Storage or local clone.
+        Requires analysis_id to be set when using blob storage.
         Supports optional context_lines to expand surrounding window.
+        Supports optional symbol to auto-locate function/class definitions.
         Uses semantic truncation if max_content_tokens is provided.
         """
         from backend.storage import get_storage
@@ -104,56 +106,130 @@ class RepositoryToolLayer:
                 "message": "start_line, end_line, and context_lines must be valid integers."
             }
 
-        # Need analysis_id to get repo hash
-        if self.analysis_id is None or self.db is None:
-            return {
-                "path": clean_path,
-                "error": "no_analysis",
-                "message": "Analysis context not available. Cannot read file."
-            }
+        # Check local repo root security boundaries directly before entering try/except
+        if self.repo_root and Path(self.repo_root).exists():
+            validate_repo_path(Path(self.repo_root), clean_path)
 
-        # Get repository hash from analysis
         try:
-            analysis = self.db.query(Analysis).filter(Analysis.id == self.analysis_id).first()
-            if not analysis:
-                return {
-                    "path": clean_path,
-                    "error": "no_analysis",
-                    "message": f"Analysis {self.analysis_id} not found."
-                }
+            # Check if reading from local repo_root or remote blob storage
+            resolved_text = None
+            if self.repo_root and Path(self.repo_root).exists():
+                full_path = validate_repo_path(Path(self.repo_root), clean_path)
+                if not full_path.exists() or not full_path.is_file():
+                    raise FileNotFoundError(f"File not found: {clean_path}")
+                resolved_text = full_path.read_text(encoding="utf-8", errors="replace")
 
-            repo = self.db.query(Repository).filter(Repository.id == analysis.repository_id).first()
-            if not repo or not repo.repository_hash:
-                return {
-                    "path": clean_path,
-                    "error": "no_repo",
-                    "message": "Repository not found."
-                }
+            if resolved_text is None:
+                # Need analysis_id to get repo hash
+                if self.analysis_id is None or self.db is None:
+                    return {
+                        "path": clean_path,
+                        "error": "no_analysis",
+                        "message": "Analysis context not available. Cannot read file."
+                    }
 
-            # Try to find the file by searching across all snapshot directories for this repo
-            repo_prefix = f"repositories/{repo.repository_hash}/snapshots/"
-            all_blobs = storage.list_objects(prefix=repo_prefix)
+                # Get repository hash from analysis
+                try:
+                    analysis = self.db.query(Analysis).filter(Analysis.id == self.analysis_id).first()
+                    if not analysis:
+                        return {
+                            "path": clean_path,
+                            "error": "no_analysis",
+                            "message": f"Analysis {self.analysis_id} not found."
+                        }
 
-            # Look for the file in any snapshot directory
-            matching_blob = None
-            for blob in all_blobs:
-                if blob.endswith(f"/{clean_path}"):
-                    matching_blob = blob
-                    break
+                    repo = self.db.query(Repository).filter(Repository.id == analysis.repository_id).first()
+                    if not repo or not repo.repository_hash:
+                        return {
+                            "path": clean_path,
+                            "error": "no_repo",
+                            "message": "Repository not found."
+                        }
 
-            if not matching_blob:
-                raise FileNotFoundError(f"File not found in any snapshot: {clean_path}")
+                    # Try to find the file by searching across all snapshot directories for this repo
+                    repo_prefix = f"repositories/{repo.repository_hash}/snapshots/"
+                    all_blobs = storage.list_objects(prefix=repo_prefix)
 
-            # Fetch from blob storage
-            raw_text = storage.get_object_text(matching_blob)
-            from backend.intelligence.notebook import resolve_source_document
-            doc = resolve_source_document(clean_path, raw_text)
-            resolved_text = doc.source if not doc.conversion_error else raw_text
+                    # Look for the file in any snapshot directory
+                    matching_blob = None
+                    for blob in all_blobs:
+                        if blob.endswith(f"/{clean_path}"):
+                            matching_blob = blob
+                            break
+
+                    if not matching_blob:
+                        raise FileNotFoundError(f"File not found in any snapshot: {clean_path}")
+
+                    # Fetch from blob storage
+                    raw_text = storage.get_object_text(matching_blob)
+                    from backend.intelligence.notebook import resolve_source_document
+                    doc = resolve_source_document(clean_path, raw_text)
+                    resolved_text = doc.source if not doc.conversion_error else raw_text
+                except Exception as e:
+                    raise e
 
             lines = resolved_text.splitlines(keepends=True)
             total_lines = len(lines)
 
-            # 1. Check unbounded read on large files (> 150 lines)
+            # 1. Resolve symbol if requested BEFORE context-overflow validation
+            target_symbol = (symbol or kwargs.get("symbol") or "").strip()
+            if target_symbol:
+                sym_found = False
+                if self.db is not None and self.analysis_id is not None:
+                    try:
+                        from backend.models.fact_store import FactSymbol, FactFile
+                        # Scope search to this file first, fallback to analysis-wide match
+                        sym_fact = (
+                            self.db.query(FactSymbol)
+                            .join(FactFile, FactSymbol.file_id == FactFile.id)
+                            .filter(
+                                FactSymbol.analysis_id == self.analysis_id,
+                                FactFile.path == clean_path,
+                                FactSymbol.name == target_symbol,
+                            )
+                            .first()
+                        )
+                        if not sym_fact:
+                            # Try suffix match on path or case-insensitive match
+                            sym_fact = (
+                                self.db.query(FactSymbol)
+                                .join(FactFile, FactSymbol.file_id == FactFile.id)
+                                .filter(
+                                    FactSymbol.analysis_id == self.analysis_id,
+                                    FactFile.path.endswith(clean_path),
+                                    FactSymbol.name.ilike(target_symbol),
+                                )
+                                .first()
+                            )
+                        if not sym_fact:
+                            sym_fact = (
+                                self.db.query(FactSymbol)
+                                .filter(
+                                    FactSymbol.analysis_id == self.analysis_id,
+                                    FactSymbol.name == target_symbol,
+                                )
+                                .first()
+                            )
+                        if sym_fact and sym_fact.line_start:
+                            start_line = max(1, sym_fact.line_start)
+                            end_line = min(total_lines, sym_fact.line_end) if sym_fact.line_end else min(total_lines, start_line + 120)
+                            sym_found = True
+                    except Exception:
+                        pass
+
+                # If FactStore didn't find it, inspect source lines directly via AST/regex definition patterns
+                if not sym_found:
+                    import re
+                    pattern = re.compile(rf"(?:async\s+)?(?:function\s+{re.escape(target_symbol)}\b|(?:const|let|var)\s+{re.escape(target_symbol)}\s*=|class\s+{re.escape(target_symbol)}\b|def\s+{re.escape(target_symbol)}\b)")
+                    for idx, line in enumerate(lines, start=1):
+                        if pattern.search(line):
+                            start_line = idx
+                            # Read until next top-level function or up to 60 lines
+                            end_line = min(total_lines, idx + 60)
+                            sym_found = True
+                            break
+
+            # 2. Check unbounded read on large files (> 150 lines)
             if end_line is None and total_lines > 150:
                 return {
                     "path": clean_path,
@@ -167,7 +243,7 @@ class RepositoryToolLayer:
                     "total_lines": total_lines,
                 }
 
-            # 2. Handle invalid/reversed/out-of-bounds line ranges consistently
+            # 3. Handle invalid/reversed/out-of-bounds line ranges consistently
             # If end_line was provided and end_line < start_line, swap them
             if end_line is not None and end_line < start_line:
                 start_line, end_line = end_line, start_line
@@ -202,8 +278,8 @@ class RepositoryToolLayer:
             requested_slice = lines[s - 1 : e]
 
             # Semantic truncation based on pre-calculated budget
-            # Default fallback: ~1200 tokens ≈ 4800 chars if not specified
-            budget_tokens = max_content_tokens if max_content_tokens and max_content_tokens > 0 else 1200
+            # Default fallback: ~2500 tokens (enough for full 200-250 lines of code)
+            budget_tokens = max_content_tokens if max_content_tokens and max_content_tokens > 0 else 2500
 
             selected_lines, count_taken, was_clamped = truncate_semantically(
                 lines=requested_slice,
@@ -222,6 +298,8 @@ class RepositoryToolLayer:
                 notice = (
                     f"\n\n[Notice: Requested range {orig_requested_start}-{orig_requested_end} exceeds safe limit of {SAFE_MAX_LINES} lines; "
                     f"clamped to lines {s}-{target_end}. "
+                    f"Returned lines {s}-{target_end} of {total_lines}.\n"
+                    f"Still unread: lines {next_start}-{orig_requested_end}.\n"
                     f"To inspect further, call read_file(path=\"{clean_path}\", start_line={next_start}, end_line={orig_requested_end}) "
                     f"or call get_file_outline(path=\"{clean_path}\") to locate symbols.]"
                 )
@@ -229,12 +307,13 @@ class RepositoryToolLayer:
             elif was_clamped and actual_end < e:
                 next_start = actual_end + 1
                 remaining_lines_count = e - actual_end
+                unread_end = min(e, total_lines)
                 notice = (
-                    f"\n\n[CONTEXT PROTECTION]\n"
-                    f"Requested lines: {s}-{e}\n"
-                    f"Returned lines: {s}-{actual_end}\n"
-                    f"Remaining lines: {next_start}-{e}\n"
-                    f"Continue with read_file(path=\"{clean_path}\", start_line={next_start}, end_line={e})."
+                    f"\n\n[CONTEXT PROTECTION - FILE TRUNCATED]\n"
+                    f"File: {clean_path} (total {total_lines} lines)\n"
+                    f"- Returned lines: {s}-{actual_end}\n"
+                    f"- Still unread in this request: lines {next_start}-{unread_end} ({remaining_lines_count} lines remaining)\n"
+                    f"Continue inspection with: read_file(path=\"{clean_path}\", start_line={next_start}, end_line={unread_end})."
                 )
                 numbered_content += notice
 
@@ -333,6 +412,31 @@ class RepositoryToolLayer:
         Note: Uses Blob Storage for complete picture, not PostgreSQL (which only indexes code files).
         """
         if self.analysis_id is None:
+            if self.repo_root and os.path.exists(self.repo_root):
+                clean_path = path.replace("\\", "/").strip("/") if path and path != "." else ""
+                target_dir = Path(self.repo_root) / clean_path if clean_path else Path(self.repo_root)
+                if not target_dir.exists():
+                    return {"path": clean_path or "/", "tree": "Directory not found", "file_count": 0}
+                
+                lines = [f"{clean_path}/" if clean_path else "."]
+                count = 0
+                for item in sorted(target_dir.rglob("*")):
+                    if ".git" in item.parts or ".venv" in item.parts or "__pycache__" in item.parts or "node_modules" in item.parts:
+                        continue
+                    rel = item.relative_to(target_dir).as_posix()
+                    depth_level = len(rel.split("/")) - 1
+                    if depth > 0 and depth_level >= depth:
+                        continue
+                    indent = "  " * (depth_level + 1)
+                    prefix = "[dir]  " if item.is_dir() else "[file] "
+                    lines.append(f"{indent}{prefix}{item.name}")
+                    if item.is_file():
+                        count += 1
+                    if count >= 100:
+                        lines.append(f"  ... ({count}+ files, truncated)")
+                        break
+                return {"path": clean_path or "/", "depth": depth, "tree": "\n".join(lines), "file_count": count}
+
             return {
                 "error": "no_analysis",
                 "message": "Analysis context not available."
@@ -501,22 +605,45 @@ class RepositoryToolLayer:
             if pat.endswith(".py") or pat == "*.py":
                 if path.endswith(".ipynb") or base.endswith(".ipynb"):
                     return True
-            return False
-
         # Validate preconditions
         if self.db is None or self.analysis_id is None:
             if self.repo_root and os.path.exists(self.repo_root):
                 root_path = Path(self.repo_root)
+                IGNORED_DIRS = {".git", ".venv", "__pycache__", "node_modules", ".pytest_cache", "dist", "build", ".idea", ".vscode", "azurite_data", "archive"}
+                SOURCE_EXTS = {".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".md", ".sql", ".ipynb"}
+
+                # Extract individual search terms (length >= 3, skipping common stop words)
+                raw_words = [w for w in re.findall(r'\b[a-zA-Z_]{3,}\b', query.lower()) if w not in {"how", "what", "where", "from", "into", "and", "the", "that", "this", "which"}]
                 try:
                     pattern = re.compile(query, re.IGNORECASE)
                 except re.error:
                     pattern = re.compile(re.escape(query), re.IGNORECASE)
 
+                term_pattern = re.compile("|".join(re.escape(w) for w in raw_words), re.IGNORECASE) if raw_words else None
+
+                # Collect candidate source files and sort core backend code first
+                candidate_paths = []
+                for p in root_path.rglob("*"):
+                    if p.is_file() and not any(part in IGNORED_DIRS for part in p.parts):
+                        if p.suffix.lower() in SOURCE_EXTS:
+                            candidate_paths.append(p)
+
+                def _sort_priority(p: Path) -> Tuple[int, str]:
+                    rel = p.relative_to(root_path).as_posix()
+                    is_code = rel.endswith((".py", ".ts", ".tsx"))
+                    is_core = any(rel.startswith(pr) for pr in ("backend/agent/", "backend/intelligence/", "backend/repository_tools/", "backend/tests/", "backend/models/"))
+                    # Score by matching query terms in file name or directory
+                    query_match_bonus = sum(1 for w in raw_words if w in rel.lower())
+                    category = 0 if (is_code and is_core) else (1 if is_code else 2)
+                    return (category, -query_match_bonus, rel)
+
+                candidate_paths.sort(key=_sort_priority)
+
                 from backend.intelligence.notebook import resolve_source_document
                 scanned = 0
-                for file_path in root_path.rglob("*"):
-                    if not file_path.is_file():
-                        continue
+                max_scanned = max(max_files_scanned, 100)
+
+                for file_path in candidate_paths:
                     rel_path = file_path.relative_to(root_path).as_posix()
                     if not _pattern_matches(rel_path, file_pattern):
                         continue
@@ -529,8 +656,19 @@ class RepositoryToolLayer:
                         else:
                             content = raw_content
 
+                        matches_in_this_file = 0
                         for idx, line in enumerate(content.splitlines(), start=1):
+                            line_hit = False
+                            # Exact regex match
                             if pattern.search(line):
+                                line_hit = True
+                            # Or multi-term density match (at least 2 query terms on the line)
+                            elif term_pattern:
+                                hits = set(term_pattern.findall(line.lower()))
+                                if len(hits) >= 2 or ("isolation" in hits and "analysis" in hits):
+                                    line_hit = True
+
+                            if line_hit:
                                 results.append({
                                     "path": rel_path,
                                     "file": rel_path,
@@ -538,8 +676,12 @@ class RepositoryToolLayer:
                                     "snippet": line.strip()[:200],
                                     "query": query,
                                 })
-                                if len(results) >= max_matches:
-                                    return results
+                                matches_in_this_file += 1
+                                if matches_in_this_file >= 1:
+                                    break
+                        if len(results) >= max_matches:
+                            return results
+
                     except Exception:
                         pass
                     if scanned >= max_files_scanned:

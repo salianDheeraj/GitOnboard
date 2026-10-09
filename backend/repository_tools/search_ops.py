@@ -18,6 +18,84 @@ from backend.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
+STOP_WORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't",
+    "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", "can't",
+    "cannot", "could", "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during",
+    "each", "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't", "having",
+    "he", "her", "here", "hers", "herself", "him", "himself", "his", "how", "i", "if", "in", "into", "is",
+    "isn't", "it", "it's", "its", "itself", "let's", "me", "more", "most", "mustn't", "my", "myself", "no",
+    "nor", "not", "of", "off", "on", "once", "only", "or", "other", "ought", "our", "ours", "ourselves", "out",
+    "over", "own", "same", "shan't", "she", "should", "shouldn't", "so", "some", "such", "than", "that", "the",
+    "their", "theirs", "them", "themselves", "then", "there", "these", "they", "this", "those", "through",
+    "to", "too", "under", "until", "up", "very", "was", "wasn't", "we", "were", "weren't", "what", "when",
+    "where", "which", "while", "who", "whom", "why", "with", "won't", "would", "wouldn't", "you", "your", "yours"
+}
+
+
+def decompose_query(query: str) -> List[str]:
+    """
+    Decomposes a complex query or natural language question into focused subqueries.
+    Handles:
+    1. Multi-sentence questions (splits on . ? !)
+    2. Comma-separated lists of symbols or topics
+    3. Technical identifiers, code symbols, and keyword density
+    """
+    if not query:
+        return []
+
+    # If already a simple comma-separated list of short phrases
+    parts = [p.strip() for p in query.split(",") if p.strip()]
+    if len(parts) > 1 and all(len(p.split()) <= 4 for p in parts):
+        return parts[:3]
+
+    sub_queries: List[str] = []
+
+    # Split by sentence/clause boundaries (. ? ! ;)
+    sentences = [s.strip() for s in re.split(r'[.?!;]+', query) if s.strip()]
+
+    for s in sentences:
+        words = s.split()
+        if not words:
+            continue
+
+        if len(words) <= 6:
+            sub_queries.append(s)
+            continue
+
+        # Extract code/technical terms (snake_case, camelCase, identifiers with underscores/slashes)
+        tech_terms = [t.replace("/", " ") for t in re.findall(r'[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)+|[A-Z][a-z]+[A-Z][a-zA-Z]*|[a-z0-9]+_[a-z0-9_]+', s)]
+        # Significant keywords (>= 4 chars, skipping stop words)
+        sig_words = [w for w in re.findall(r'\b[a-zA-Z_]{4,}\b', s) if w.lower() not in STOP_WORDS]
+
+        # Combine terms to make a rich multi-keyword query
+        combined_words = []
+        for t in tech_terms:
+            combined_words.extend(t.split())
+        for w in sig_words:
+            if w.lower() not in [cw.lower() for cw in combined_words]:
+                combined_words.append(w)
+
+        if combined_words:
+            sub_queries.append(" ".join(combined_words[:5]))
+
+
+    # Deduplicate while preserving order and limit to top 3 focused subqueries
+    seen = set()
+    deduped = []
+    for sq in sub_queries:
+        norm = sq.lower().strip()
+        if norm and norm not in seen and len(norm) >= 3:
+            seen.add(norm)
+            deduped.append(sq)
+        if len(deduped) >= 3:
+            break
+
+    return deduped if deduped else [query]
+
+
+
+
 
 def search_code_ops(
     tool_layer: Any,
@@ -184,7 +262,7 @@ def search_repository_ops(
     if retriever is None:
         return search_repository_fallback_ops(tool_layer, query, limit, offset)
 
-    sub_queries = [q.strip() for q in query.split(",") if q.strip()]
+    sub_queries = decompose_query(query)
     if not sub_queries:
         return []
 
@@ -246,61 +324,86 @@ def search_repository_fallback_ops(
     combined: List[Dict[str, Any]] = []
     seen_keys = set()
 
-    sub_queries = [q.strip() for q in query.split(",") if q.strip()]
+    sub_queries = decompose_query(query)
     if not sub_queries:
         return []
 
+
     max_total = min(limit * len(sub_queries), 30)
+
+    # Direct search_code pass with original query for multi-term density matching
+    if query not in sub_queries:
+
+        direct_lex = tool_layer.search_code(query, max_matches=10)
+        for lex in direct_lex:
+            f = lex["file"]
+            if f not in seen_keys:
+                seen_keys.add(f)
+                combined.append({
+                    "type": "code",
+                    "file": f,
+                    "line": lex["line"],
+                    "snippet": lex["snippet"],
+                    "query": query,
+                    "match_source": "lexical_density",
+                    "score": 10,
+                })
 
     for sub_query in sub_queries:
         # 1. Symbol search
         sym_matches = tool_layer.get_symbol(sub_query)
         for sym in sym_matches[:5]:
-            key = f"sym:{sym['file']}:{sym['name']}"
-            if key not in seen_keys:
-                seen_keys.add(key)
+            f = sym["file"]
+            if f not in seen_keys:
+                seen_keys.add(f)
                 combined.append({
                     "type": "symbol",
-                    "file": sym["file"],
+                    "file": f,
                     "symbol": sym["name"],
                     "symbol_type": sym["symbol_type"],
                     "lines": f"{sym['line_start']}-{sym['line_end']}",
                     "query": sub_query,
                     "match_source": "symbol_index",
-                    "score": 0,
+                    "score": 5,
                 })
 
         # 2. File path match
         file_matches = tool_layer.find_files(f"*{sub_query}*")
-        for f in file_matches[:5]:
-            key = f"file:{f['path']}"
-            if key not in seen_keys:
-                seen_keys.add(key)
+        for f_item in file_matches[:5]:
+            f = f_item["path"]
+            if f not in seen_keys:
+                seen_keys.add(f)
                 combined.append({
                     "type": "file",
-                    "file": f["path"],
-                    "size": f.get("size", 0),
+                    "file": f,
+                    "size": f_item.get("size", 0),
                     "query": sub_query,
                     "match_source": "filename_manifest",
-                    "score": 0,
+                    "score": 2,
                 })
 
         # 3. Lexical search in source files
         lex_matches = tool_layer.search_code(sub_query, max_matches=5)
         for lex in lex_matches:
-            key = f"lex:{lex['file']}:{lex['line']}"
-            if key not in seen_keys:
-                seen_keys.add(key)
+            f = lex["file"]
+            if f not in seen_keys:
+                seen_keys.add(f)
                 combined.append({
                     "type": "code",
-                    "file": lex["file"],
+                    "file": f,
                     "line": lex["line"],
                     "snippet": lex["snippet"],
                     "query": sub_query,
                     "match_source": "lexical",
-                    "score": 0,
+                    "score": 1,
                 })
 
+    # Sort results to bubble high-signal density matches to the top
+    combined.sort(key=lambda x: -x.get("score", 0))
+
     start = offset
-    end = offset + max_total
+    end = offset + limit
     return combined[start:end]
+
+
+

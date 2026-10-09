@@ -116,7 +116,7 @@ class TestQueryRimSemanticsAndResolution:
         resolver.resolve.return_value = None  # Entity not in repository index
 
         dispatch = ToolDispatchTable(tool_layer, traverser, resolver)
-        obs = dispatch.dispatch("query_rim", {"entity_name": "nonExistentSymbol"})
+        obs = dispatch.dispatch("get_code_relationships", {"entity_name": "nonExistentSymbol"})
 
         assert obs.success is True
         assert obs.data["found"] is False
@@ -144,7 +144,7 @@ class TestQueryRimSemanticsAndResolution:
         )
 
         dispatch = ToolDispatchTable(tool_layer, traverser, resolver)
-        obs = dispatch.dispatch("query_rim", {
+        obs = dispatch.dispatch("get_code_relationships", {
             "entity_name": "authMiddleware",
             "relationship_type": "CALLS",
             "direction": "FORWARD",
@@ -186,7 +186,7 @@ class TestQueryRimSemanticsAndResolution:
         )
 
         dispatch = ToolDispatchTable(tool_layer, traverser, resolver)
-        obs = dispatch.dispatch("query_rim", {
+        obs = dispatch.dispatch("get_code_relationships", {
             "entity_name": "authMiddleware",
             "relationship_type": "CALLS",
             "direction": "FORWARD",
@@ -223,7 +223,7 @@ class TestQueryRimSemanticsAndResolution:
         dispatch = ToolDispatchTable(tool_layer, traverser, resolver)
 
         # 1. LOCAL clamps depth to 1
-        dispatch.dispatch("query_rim", {"entity_name": "func", "scope": "LOCAL", "depth": 5})
+        dispatch.dispatch("get_code_relationships", {"entity_name": "func", "scope": "LOCAL", "depth": 5})
         traverser.traverse_bounded.assert_called_with(
             target=mock_target,
             relationship_type="GENERIC",
@@ -235,7 +235,7 @@ class TestQueryRimSemanticsAndResolution:
         )
 
         # 2. NEIGHBORHOOD clamps depth to max 3
-        dispatch.dispatch("query_rim", {"entity_name": "func", "scope": "NEIGHBORHOOD", "depth": 10})
+        dispatch.dispatch("get_code_relationships", {"entity_name": "func", "scope": "NEIGHBORHOOD", "depth": 10})
         traverser.traverse_bounded.assert_called_with(
             target=mock_target,
             relationship_type="GENERIC",
@@ -247,7 +247,7 @@ class TestQueryRimSemanticsAndResolution:
         )
 
         # 3. Limit clamps to max 50
-        dispatch.dispatch("query_rim", {"entity_name": "func", "scope": "LOCAL", "limit": 100})
+        dispatch.dispatch("get_code_relationships", {"entity_name": "func", "scope": "LOCAL", "limit": 100})
         traverser.traverse_bounded.assert_called_with(
             target=mock_target,
             relationship_type="GENERIC",

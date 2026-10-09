@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 KNOWN_TOOLS = {
     "search_code", "search_repository", "get_file_outline",
-    "get_code_relationships", "query_rim", "read_file", "get_tree"
+    "get_code_relationships", "read_file", "get_tree"
 }
 
 
@@ -212,7 +212,7 @@ def parse_final_synthesis(text: str) -> str:
     cleaned = re.sub(r'\[TOOL_CALL\].*$', '', cleaned, flags=re.DOTALL)
     cleaned = re.sub(r'\[TOOL_CALL\]', '', cleaned)
 
-    cleaned = re.sub(r'```(?:tool_call|json)?\s*\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)"[^{}]*\}\s*```', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'```(?:tool_call|json)?\s*\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|get_tree)"[^{}]*\}\s*```', '', cleaned, flags=re.DOTALL)
     cleaned = re.sub(r'```tool_call\s*.*?```', '', cleaned, flags=re.DOTALL)
     cleaned = re.sub(r'```tool_call\s*.*$', '', cleaned, flags=re.DOTALL)
 
@@ -225,14 +225,14 @@ def parse_final_synthesis(text: str) -> str:
     cleaned = re.sub(r'</?parameter[^>]*>', '', cleaned)
 
     # 4. Strip JSON tool calls
-    for match in re.finditer(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
+    for match in re.finditer(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
         cleaned = cleaned.replace(match.group(0), "")
 
-    for match in re.finditer(r'\{[^{}]*"tool_name"\s*:\s*"(?:read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
+    for match in re.finditer(r'\{[^{}]*"tool_name"\s*:\s*"(?:read_file|search_code|search_repository|get_file_outline|get_code_relationships|get_tree)"[^{}]*\}', cleaned, re.DOTALL):
         cleaned = cleaned.replace(match.group(0), "")
 
-    cleaned = re.sub(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)".*$', '', cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r'\{[^{}]*"tool_name"\s*:\s*"(?:read_file|search_code|search_repository|get_file_outline|get_code_relationships|query_rim|get_tree)".*$', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'\{[^{}]*"action"\s*:\s*"(?:tool_call|read_file|search_code|search_repository|get_file_outline|get_code_relationships|get_tree)".*$', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'\{[^{}]*"tool_name"\s*:\s*"(?:read_file|search_code|search_repository|get_file_outline|get_code_relationships|get_tree)".*$', '', cleaned, flags=re.DOTALL)
 
     fa_json_match = re.search(r'\{[^{}]*"action"\s*:\s*"final_answer"\s*,\s*"answer"\s*:\s*"(.*?)"\s*\}', cleaned, re.DOTALL)
     if fa_json_match:

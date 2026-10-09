@@ -218,3 +218,29 @@ def test_regression_stage1_and_stage2():
     is_dup2, feedback = guardrails.is_duplicate_call("read_file", {"end_line": 50, "path": "app.py", "start_line": 1})
     assert is_dup2 is True
     assert "[DUPLICATE TOOL CALL]" in feedback
+
+
+def test_read_file_with_symbol_resolves_range_on_large_file(mock_storage_and_tool_layer):
+    """
+    Test P0: read_file(symbol=...) resolves symbol BEFORE context-overflow validation.
+    Even on a 400-line file where unbounded read is refused,
+    specifying a symbol (e.g. function defined in lines 120-140) resolves the line boundaries
+    and returns only that symbol without triggering context_overflow_protection.
+    """
+    tool_layer = mock_storage_and_tool_layer
+
+    # Add a function definition inside big_service.py content (lines 120-130)
+    lines = [f"line_{i} = {i}" for i in range(1, 401)]
+    lines[120] = "function getDeviceFingerprint() {"
+    lines[125] = "    return 'fingerprint';"
+    lines[129] = "}"
+    from backend.storage import get_storage
+    get_storage().put_object("repositories/mock-hash/snapshots/snap1/big_service.py", "\n".join(lines))
+
+    # Call read_file on 400-line file with symbol="getDeviceFingerprint" and no start/end lines
+    res = tool_layer.read_file("big_service.py", symbol="getDeviceFingerprint")
+
+    assert "error" not in res
+    assert res["start_line"] == 121
+    assert res["end_line"] >= 130
+    assert "getDeviceFingerprint" in res["content"]
