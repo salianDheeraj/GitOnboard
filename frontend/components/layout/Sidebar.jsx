@@ -16,17 +16,17 @@ import {
 } from 'lucide-react';
 
 const navItems = [
-  { id: 'overview', label: 'Dashboard', icon: LayoutDashboard, path: '' },
-  { id: 'conversation-flow', label: 'LLM Conversation Flow', icon: MessageCircle, path: '/conversation-flow' },
-  { id: 'investigation', label: 'Multi-Agent Investigation', icon: Sparkles, path: '/investigation' },
-  { id: 'rim-comparison', label: 'RIM Comparison', icon: GitCompare, path: '/rim-comparison' },
+  { id: 'investigation', label: 'Chatbot', icon: Sparkles, path: '/investigation' },
   { id: 'knowledge-graph', label: 'Knowledge Graph', icon: Share2, path: '/knowledge-graph' },
   { id: 'summary', label: 'AI Summary', icon: Sparkles, path: '/summary' },
-  { id: 'trace', label: 'Feature Tracing', icon: GitMerge, path: '/trace' },
-  { id: 'workspace', label: 'AI Workspace IDE', icon: Sparkles, path: '/workspace' },
   { id: 'search', label: 'Search', icon: Search, path: '/search' },
+  { id: 'conversation-flow', label: 'LLM Conversation Flow', icon: MessageCircle, path: '/conversation-flow' },
+  { id: 'overview', label: 'Dashboard', icon: LayoutDashboard, path: '' },
+  { id: 'trace', label: 'Feature Tracing', icon: GitMerge, path: '/trace' },
   { id: 'explorer', label: 'File Explorer', icon: FolderTree, path: '/explorer' },
   { id: 'architecture', label: 'Architecture', icon: Network, path: '/architecture' },
+  { id: 'rim-comparison', label: 'RIM Comparison', icon: GitCompare, path: '/rim-comparison' },
+  { id: 'workspace', label: 'AI Workspace IDE', icon: Sparkles, path: '/workspace' },
 ];
 
 export function Sidebar({ repoName }) {

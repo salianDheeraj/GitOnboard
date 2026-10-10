@@ -24,7 +24,7 @@ interface SidebarProps {
 const navItems = [
   { id: 'overview', label: 'Dashboard', icon: LayoutDashboard, path: '' },
   { id: 'conversation-flow', label: 'LLM Conversation Flow', icon: MessageCircle, path: '/conversation-flow' },
-  { id: 'investigation', label: 'Multi-Agent Investigation', icon: Sparkles, path: '/investigation' },
+  { id: 'investigation', label: 'Chatbot', icon: Sparkles, path: '/investigation' },
   { id: 'rim-comparison', label: 'RIM Comparison', icon: GitCompare, path: '/rim-comparison' },
   { id: 'knowledge-graph', label: 'Knowledge Graph', icon: Share2, path: '/knowledge-graph' },
   { id: 'summary', label: 'AI Summary', icon: Bot, path: '/summary' },
