@@ -187,6 +187,14 @@ class LocalInvestigationWorker:
         self.max_tokens_per_turn = max_tokens_per_turn if max_tokens_per_turn is not None else settings.investigation_turn_max_tokens
         self.on_event = on_event
         self.protocol_adapter = QAProtocolAdapter(model_id=model, provider=provider)
+        self.reset_active_state()
+
+    def reset_active_state(self) -> None:
+        """Reset all per-agent active tracking collections to prevent state bleeding between subtasks."""
+        self._active_files_read = []
+        self._active_files_inspected = []
+        self._active_findings = []
+        self._active_turns = []
 
     async def execute_subtask(
         self,
@@ -497,11 +505,23 @@ class LocalInvestigationWorker:
                         recovery_sent = True
                         continue
 
+                # Circuit Breaker: If the model continues calling search tools after already reading source files,
+                # redirect it firmly to final_answer instead of looping through search_repository indefinitely.
+                if tool_name in ("search_repository", "search_code", "find_files") and len(read_contents_cache) > 0:
+                    read_files_list = ", ".join(dict.fromkeys(f['path'] for f in read_contents_cache))
+                    if turn_idx >= self.max_turns - 3 or prior_call_count >= 1 or len(read_contents_cache) >= 1:
+                        search_breaker_prompt = (
+                            f"{obs_text}\n\n"
+                            f"STOP SEARCHING: You have already read the source code in {read_files_list}. "
+                            "Do not run further repository searches. Synthesize your findings immediately and call final_answer with your structured JSON."
+                        )
+                        messages.append({"role": "user", "content": search_breaker_prompt})
+                        continue
+
                 # After repeated unproductive calls (>= 2) or approaching turn limits with read files
                 should_prompt_finalize = (
                     (prior_call_count >= 1 or unproductive_streak >= 2 or turn_idx >= self.max_turns - 2)
                     and len(read_contents_cache) > 0
-                    and not recovery_sent
                 )
                 if should_prompt_finalize:
                     recovery_prompt = (
@@ -651,6 +671,12 @@ class LocalInvestigationWorker:
         duration_ms = (time.perf_counter() - start_time) * 1000
         logger.warning(f"[LocalWorker] Subtask '{subtask.id}' reached max turns ({self.max_turns}).")
         
+        # Ensure all read files from read_contents_cache are present in files_inspected
+        for item in read_contents_cache:
+            p_path = item.get("path")
+            if p_path and p_path not in files_inspected:
+                files_inspected.append(p_path)
+
         # If model exhausted turn budget before formatting final_answer, but DID read source code,
         # extract real code findings from the read contents cache so grounded facts are not discarded.
         if len(findings) == 0 and read_contents_cache:

@@ -159,6 +159,10 @@ class InvestigationOrchestrator:
             prior_findings = store.get_all_findings()
 
             # Execute subtask with complete context and hard timeout guarantee
+            # Explicitly reset per-agent state before execution to ensure complete isolation
+            if hasattr(self.worker, "reset_active_state"):
+                self.worker.reset_active_state()
+
             worker_result = None
             turns = []
             try:
@@ -204,6 +208,10 @@ class InvestigationOrchestrator:
                     coverage_gaps=[f"Worker error: {str(e)}"],
                     limitations=["Execution halted due to unhandled exception."],
                 )
+            finally:
+                # Cleanly clear worker active state so timer or partial findings from this task cannot bleed into next task
+                if hasattr(self.worker, "reset_active_state"):
+                    self.worker.reset_active_state()
 
             all_turns.extend(turns)
             store.turns_history.extend(turns)
