@@ -200,22 +200,31 @@ def compact_messages_deterministically(
             else:
                 seen_paths.add(path)
 
-    # Pass 2: Compact older observations (> 2 messages from the end)
+    # Pass 2: Compact older non-source observations (> 2 messages from the end)
+    # Never degrade source code observations ([read_file] or "Showing X lines") to outlines
+    # unless they are deduplicated duplicates from Pass 1.
     for idx in range(len(conversation) - 2):
         msg = conversation[idx]
         content = msg.get("content", "")
         if "[Deduplicated" in content:
+            continue
+        meta = extract_read_file_metadata(content)
+        # Protect verified read_file evidence from unconditional outline degradation
+        if meta and meta.get("path"):
             continue
         if len(content) > 300:
             lines = content.splitlines()
             header = lines[0] if lines else ""
             msg["content"] = f"{header}\n... [Older observation compacted to outline ({len(lines)} lines)] ..."
 
-    # Pass 3: If still heavy, compact non-deduplicated earlier messages
+    # Pass 3: If still heavy, compact non-deduplicated earlier non-source messages
     for idx in range(len(conversation) - 1):
         msg = conversation[idx]
         content = msg.get("content", "")
         if "[Deduplicated" in content:
+            continue
+        meta = extract_read_file_metadata(content)
+        if meta and meta.get("path"):
             continue
         if len(content) > 200:
             msg["content"] = content[:150] + "\n... [Compacted] ..."

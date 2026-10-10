@@ -27,6 +27,7 @@ from .security import (
     is_binary_file,
 )
 from .resolver import resolve_repo_root
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -106,26 +107,35 @@ class RepositoryToolLayer:
                 "message": "start_line, end_line, and context_lines must be valid integers."
             }
 
-        # Check local repo root security boundaries directly before entering try/except
-        if self.repo_root and Path(self.repo_root).exists():
-            validate_repo_path(Path(self.repo_root), clean_path)
-
         try:
             # Check if reading from local repo_root or remote blob storage
             resolved_text = None
             if self.repo_root and Path(self.repo_root).exists():
-                full_path = validate_repo_path(Path(self.repo_root), clean_path)
-                if not full_path.exists() or not full_path.is_file():
-                    raise FileNotFoundError(f"File not found: {clean_path}")
-                resolved_text = full_path.read_text(encoding="utf-8", errors="replace")
+                try:
+                    full_path = validate_repo_path(Path(self.repo_root), clean_path)
+                    if full_path.exists() and full_path.is_file():
+                        resolved_text = full_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+                # If direct path wasn't found in repo_root, search for suffix / basename match within repo_root
+                if resolved_text is None:
+                    repo_path_obj = Path(self.repo_root)
+                    for candidate in repo_path_obj.rglob("*"):
+                        if candidate.is_file():
+                            rel_cand = candidate.relative_to(repo_path_obj).as_posix()
+                            if rel_cand.endswith(clean_path) or clean_path.endswith(rel_cand):
+                                resolved_text = candidate.read_text(encoding="utf-8", errors="replace")
+                                clean_path = rel_cand
+                                break
 
             if resolved_text is None:
                 # Need analysis_id to get repo hash
                 if self.analysis_id is None or self.db is None:
                     return {
                         "path": clean_path,
-                        "error": "no_analysis",
-                        "message": "Analysis context not available. Cannot read file."
+                        "error": "wrong_path",
+                        "message": f"File '{clean_path}' not found in repository."
                     }
 
                 # Get repository hash from analysis
@@ -153,9 +163,16 @@ class RepositoryToolLayer:
                     # Look for the file in any snapshot directory
                     matching_blob = None
                     for blob in all_blobs:
-                        if blob.endswith(f"/{clean_path}"):
+                        if blob.endswith(f"/{clean_path}") or clean_path.endswith(blob.split("/snapshots/")[-1].split("/", 1)[-1]):
                             matching_blob = blob
                             break
+
+                    if not matching_blob:
+                        # Fallback: match by basename if unique
+                        base_name = clean_path.split("/")[-1]
+                        basename_matches = [b for b in all_blobs if b.endswith(f"/{base_name}")]
+                        if len(basename_matches) == 1:
+                            matching_blob = basename_matches[0]
 
                     if not matching_blob:
                         raise FileNotFoundError(f"File not found in any snapshot: {clean_path}")
@@ -229,15 +246,17 @@ class RepositoryToolLayer:
                             sym_found = True
                             break
 
-            # 2. Check unbounded read on large files (> 150 lines)
-            if end_line is None and total_lines > 150:
+            safe_limit = getattr(settings, "investigation_read_file_max_lines", 600)
+
+            # 2. Check unbounded read on large files (> safe_limit lines)
+            if end_line is None and total_lines > safe_limit:
                 return {
                     "path": clean_path,
                     "error": "context_overflow_protection",
                     "message": (
                         f"Refusing full file read: '{clean_path}' has {total_lines} lines. "
                         f"Reading the entire file without line boundaries will cause context overflow. "
-                        f"Please use start_line and end_line (safe read limit is 250 lines), "
+                        f"Please use start_line and end_line (safe read limit is {safe_limit} lines), "
                         f"or run get_file_outline first."
                     ),
                     "total_lines": total_lines,
@@ -258,11 +277,11 @@ class RepositoryToolLayer:
                 }
 
             orig_requested_start = max(1, start_line)
-            orig_requested_end = min(total_lines, end_line) if end_line is not None else min(total_lines, orig_requested_start + 249)
+            orig_requested_end = min(total_lines, end_line) if end_line is not None else min(total_lines, orig_requested_start + safe_limit - 1)
 
-            # 3. Enforce safe line range limit (max 250 lines)
+            # 3. Enforce safe line range limit
             range_clamped = False
-            SAFE_MAX_LINES = 250
+            SAFE_MAX_LINES = safe_limit
             if (orig_requested_end - orig_requested_start + 1) > SAFE_MAX_LINES:
                 target_end = orig_requested_start + SAFE_MAX_LINES - 1
                 range_clamped = True

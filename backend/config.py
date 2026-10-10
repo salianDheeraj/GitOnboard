@@ -124,6 +124,33 @@ class Settings(BaseSettings):
     openrouter_control_reservation_tokens: int = 200
     openrouter_output_reservation_tokens: int = 2048
 
+    # Investigation Agent Configuration (LOCAL vs PROD)
+    # Output tokens
+    investigation_synthesis_max_tokens_local: int = 4096
+    investigation_synthesis_max_tokens_prod: int = 16384
+    investigation_turn_max_tokens_local: int = 2048
+    investigation_turn_max_tokens_prod: int = 8192
+
+    # Concurrency and subtask counts
+    investigation_concurrency_local: int = 1
+    investigation_concurrency_prod: int = 5
+    investigation_max_turns_local: int = 10
+    investigation_max_turns_prod: int = 35
+    investigation_max_total_tasks_local: int = 6
+    investigation_max_total_tasks_prod: int = 20
+
+    # Wall-clock timeouts and observations
+    investigation_subtask_timeout_local: float = 600.0   # 10 min
+    investigation_subtask_timeout_prod: float = 1200.0   # 20 min
+    investigation_max_observation_chars_local: int = 24000
+    investigation_max_observation_chars_prod: int = 120000
+
+    # Tool limits
+    investigation_read_file_max_lines_local: int = 600
+    investigation_read_file_max_lines_prod: int = 1000
+    investigation_search_limit_local: int = 10
+    investigation_search_limit_prod: int = 50
+
     class Config:
         env_file = ".env"
         extra = "ignore"
@@ -178,5 +205,45 @@ class Settings(BaseSettings):
         if self.deployment_type == "PROD" and self.prod_azure_storage_container.strip():
             return self.prod_azure_storage_container.strip()
         return self.azure_storage_container.strip()
+
+    @property
+    def is_prod(self) -> bool:
+        return str(self.deployment_type).strip().upper() == "PROD"
+
+    @property
+    def investigation_synthesis_max_tokens(self) -> int:
+        return self.investigation_synthesis_max_tokens_prod if self.is_prod else self.investigation_synthesis_max_tokens_local
+
+    @property
+    def investigation_turn_max_tokens(self) -> int:
+        return self.investigation_turn_max_tokens_prod if self.is_prod else self.investigation_turn_max_tokens_local
+
+    @property
+    def investigation_concurrency(self) -> int:
+        return self.investigation_concurrency_prod if self.is_prod else self.investigation_concurrency_local
+
+    @property
+    def investigation_max_turns(self) -> int:
+        return self.investigation_max_turns_prod if self.is_prod else self.investigation_max_turns_local
+
+    @property
+    def investigation_max_total_tasks(self) -> int:
+        return self.investigation_max_total_tasks_prod if self.is_prod else self.investigation_max_total_tasks_local
+
+    @property
+    def investigation_subtask_timeout(self) -> float:
+        return self.investigation_subtask_timeout_prod if self.is_prod else self.investigation_subtask_timeout_local
+
+    @property
+    def investigation_max_observation_chars(self) -> int:
+        return self.investigation_max_observation_chars_prod if self.is_prod else self.investigation_max_observation_chars_local
+
+    @property
+    def investigation_read_file_max_lines(self) -> int:
+        return self.investigation_read_file_max_lines_prod if self.is_prod else self.investigation_read_file_max_lines_local
+
+    @property
+    def investigation_search_limit(self) -> int:
+        return self.investigation_search_limit_prod if self.is_prod else self.investigation_search_limit_local
 
 settings = Settings()

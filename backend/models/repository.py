@@ -92,3 +92,5 @@ class TaskStatus(Base):
     task_name = Column(String, nullable=False)
     status = Column(String, nullable=False, default="pending")  # pending, processing, completed, failed
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+# Alias for backward compatibility – tests expect RepositoryAnalysis to be importable from this module
+RepositoryAnalysis = Analysis

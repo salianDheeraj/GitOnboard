@@ -27,6 +27,7 @@ from backend.agent.intent.semantic_query import (
 from backend.services.qa_budgeting import (
     compact_messages_deterministically,
     derive_provider_budget_profile,
+    extract_read_file_metadata,
 )
 from backend.services.qa_formatters import format_tool_observation
 from backend.services.qa_protocol import QAProtocolAdapter
@@ -1015,11 +1016,34 @@ class QALoop:
                 Message(role=MessageRole.SYSTEM, content=final_system_prompt),
             ]
 
-            # Context windowing: keep initial query and recent turns to prevent token explosion on rate-limited providers
+            # Context windowing: keep initial query and recent turns to prevent token explosion on rate-limited providers,
+            # while ensuring verified file observations from earlier turns are preserved in the synthesis pool.
             window_size = 10
             msgs_to_include = messages
             if len(messages) > window_size and len(messages) > 1:
-                msgs_to_include = [messages[0]] + messages[-(window_size - 1):]
+                recent_msgs = messages[-(window_size - 1):]
+                # Identify any unique read_file evidence messages from older history not in recent_msgs
+                older_evidence = []
+                recent_ids = {id(m) for m in recent_msgs}
+                seen_evidence_paths = set()
+                # Check recent messages for paths already present
+                for m in recent_msgs:
+                    c = m.get("content", "") if isinstance(m, dict) else str(m)
+                    meta = extract_read_file_metadata(c)
+                    if meta and meta.get("path"):
+                        seen_evidence_paths.add(meta["path"])
+
+                for m in messages[1:-(window_size - 1)]:
+                    if id(m) in recent_ids:
+                        continue
+                    c = m.get("content", "") if isinstance(m, dict) else str(m)
+                    meta = extract_read_file_metadata(c)
+                    # If this older message contains source evidence for a file not in recent messages, preserve it
+                    if meta and meta.get("path") and meta["path"] not in seen_evidence_paths:
+                        older_evidence.append(m)
+                        seen_evidence_paths.add(meta["path"])
+
+                msgs_to_include = [messages[0]] + older_evidence + recent_msgs
 
             # Enforce provider-aware budgeting on final answer turn as well
             profile = self._get_provider_budget_profile()

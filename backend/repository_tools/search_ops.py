@@ -47,7 +47,7 @@ def decompose_query(query: str) -> List[str]:
     # If already a simple comma-separated list of short phrases
     parts = [p.strip() for p in query.split(",") if p.strip()]
     if len(parts) > 1 and all(len(p.split()) <= 4 for p in parts):
-        return parts[:3]
+        return parts[:8]
 
     sub_queries: List[str] = []
 
@@ -276,28 +276,35 @@ def search_repository_ops(
             results = retriever.retrieve(sub_query, top_k=top_k)
 
             for result in results:
-                if result.symbol:
-                    key = f"sym:{result.file_path}:{result.symbol}"
+                # RetrieverResult has entity_name, entity_type, line_start, line_end, file_path
+                sym = getattr(result, "symbol", None) or getattr(result, "entity_name", None)
+                l_start = getattr(result, "line_start", None)
+                l_end = getattr(result, "line_end", None)
+                l_num = getattr(result, "line_number", None) or l_start or 1
+                snippet = getattr(result, "snippet", "") or getattr(result, "entity_name", "")
+
+                if sym and getattr(result, "entity_type", None) == "symbol":
+                    key = f"sym:{result.file_path}:{sym}"
                     if key not in seen_keys:
                         seen_keys.add(key)
                         combined.append({
                             "type": "symbol",
                             "file": result.file_path,
-                            "symbol": result.symbol,
-                            "lines": f"{result.line_start}-{result.line_end}" if result.line_start else "",
+                            "symbol": sym,
+                            "lines": f"{l_start}-{l_end}" if l_start else "",
                             "query": sub_query,
                             "match_source": result.score_type or "symbol_index",
                             "score": result.score,
                         })
                 else:
-                    key = f"code:{result.file_path}:{result.line_number}"
+                    key = f"code:{result.file_path}:{l_num}"
                     if key not in seen_keys:
                         seen_keys.add(key)
                         combined.append({
                             "type": "code",
                             "file": result.file_path,
-                            "line": result.line_number,
-                            "snippet": result.snippet or "",
+                            "line": l_num,
+                            "snippet": snippet,
                             "query": sub_query,
                             "match_source": result.score_type or "hybrid",
                             "score": result.score,

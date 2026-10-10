@@ -50,9 +50,17 @@ else:
     engine_args["pool_pre_ping"] = True
 
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, 
+    SQLALCHEMY_DATABASE_URL,
     **engine_args
 )
+
+# Provide a getter for the engine (used by some tests/modules expecting it)
+def get_engine():
+    """Return the SQLAlchemy engine instance.
+    Some legacy code or tests import ``get_engine`` from ``backend.database``.
+    This helper mirrors the original contract without altering existing behavior.
+    """
+    return engine
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()

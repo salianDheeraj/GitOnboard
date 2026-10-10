@@ -480,7 +480,7 @@ def identify_missing_evidence(
                 if r_path:
                     read_files_map[r_path] = max(read_files_map.get(r_path, 0), int(r_end))
 
-            uninspected_match = None
+            candidate_matches = []
             for s_turn in successful_searches:
                 for match in s_turn.tool_observation.get("data", []):
                     if isinstance(match, dict):
@@ -489,17 +489,15 @@ def identify_missing_evidence(
                         if p:
                             p_norm = p.replace("\\", "/").strip("/").lower()
                             if p_norm not in read_files_map:
-                                uninspected_match = (p, int(ln))
-                                break
+                                candidate_matches.append((p, int(ln), False))
                             elif int(ln) > read_files_map[p_norm]:
-                                # Match is in lines that were NOT read yet
-                                uninspected_match = (p, int(ln))
-                                break
-                if uninspected_match:
-                    break
+                                # Match is in lines of an active file that were NOT read yet
+                                candidate_matches.append((p, int(ln), True))
 
-            if uninspected_match:
-                path, line = uninspected_match
+            if candidate_matches:
+                # Prioritize unread ranges of files already being examined, or specific matches
+                candidate_matches.sort(key=lambda c: (0 if c[2] else 1))
+                path, line, _ = candidate_matches[0]
                 start = max(1, line - 10)
                 end = line + 30
                 return (
@@ -684,6 +682,20 @@ def validate_final_answer_against_evidence(
                     sym_pat = re.compile(rf"\b(no|not|does not contain|does not exist|cannot find|isn't any)\b[^\.\n]*\b{re.escape(sym_name)}\b", re.IGNORECASE)
                     if sym_pat.search(answer_clean):
                         contradictions.append(f"Claim that '{sym_name}' does not exist is contradicted by tool observation in {file_name}.")
+
+    # Check for blanket claims that inspected files were "not inspected" or "could not be verified"
+    for file_path in inspected_files.keys():
+        file_base = file_path.split("/")[-1].split("\\")[-1]
+        not_inspected_pat = re.compile(
+            rf"\b(?:was not|were not|could not be|not)\s+(?:inspected|read|investigated|found)\b[^\.\n]*\b{re.escape(file_base)}\b"
+            rf"|\b{re.escape(file_base)}\b[^\.\n]*\b(?:was not|were not|could not be|not)\s+(?:inspected|read|investigated|found)\b",
+            re.IGNORECASE,
+        )
+        if not_inspected_pat.search(answer_clean):
+            contradictions.append(
+                f"Claim that '{file_base}' was not inspected is contradicted by execution trace: "
+                f"file was read and inspected in this session."
+            )
 
     # 3. Positive Relationship Claim Validation (P0-4):
     # Detect assertions like "X calls Y" or "X invokes Y" and verify that evidence was retrieved.
