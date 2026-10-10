@@ -9,6 +9,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from backend.agent.loop.contracts import ToolObservation
+from backend.config import settings
 from backend.intelligence.retrieval.graph_traverser import FactStoreGraphTraverser, TraversedEntity
 from backend.repository_tools.tools import RepositoryToolLayer
 from backend.agent.intent.semantic_query import SemanticQueryClass, TraversalDirection, SemanticQueryIntent
@@ -245,6 +246,7 @@ class ToolDispatchTable:
         arguments: Dict[str, Any],
         max_content_tokens: Optional[int] = None,
         control_reservation_tokens: int = 60,
+        tool_call_id: Optional[str] = None,
     ) -> ToolObservation:
         """
         Dispatch tool call to underlying implementation.
@@ -256,7 +258,8 @@ class ToolDispatchTable:
         Baseline can only access: read_file, search_repository, get_tree
         RIM can access: read_file, search_repository, get_tree, get_file_outline, search_code, get_code_relationships
         """
-        tool_call_id = f"{tool_name}:{hash(str(arguments))}"
+        if not tool_call_id:
+            tool_call_id = f"{tool_name}:{hash(str(arguments))}"
 
         # ENFORCE TOOL RESTRICTIONS BY MODE
         allowed_baseline_tools = {"read_file", "search_repository", "get_tree"}
@@ -329,7 +332,7 @@ class ToolDispatchTable:
         control_reservation_tokens: int = 60,
     ) -> ToolObservation:
         """Handle read_file tool call."""
-        path = arguments.get("path", "")
+        path = arguments.get("path") or arguments.get("file") or arguments.get("file_path") or ""
         start_line = arguments.get("start_line", 1)
         end_line = arguments.get("end_line", None)
         context_lines = arguments.get("context_lines", 0)
@@ -417,7 +420,7 @@ class ToolDispatchTable:
 
     def _handle_get_file_outline(self, arguments: Dict[str, Any], tool_call_id: str) -> ToolObservation:
         """Handle get_file_outline tool call."""
-        path = arguments.get("path", "")
+        path = arguments.get("path") or arguments.get("file") or arguments.get("file_path") or ""
 
         if not path:
             return ToolObservation(
@@ -439,7 +442,8 @@ class ToolDispatchTable:
     def _handle_search_repository(self, arguments: Dict[str, Any], tool_call_id: str) -> ToolObservation:
         """Handle search_repository tool call."""
         query = arguments.get("query", "")
-        limit = arguments.get("limit", 10)
+        default_limit = getattr(settings, "investigation_search_limit", 10)
+        limit = arguments.get("limit", default_limit)
         offset = arguments.get("offset", 0)
 
         if not query:
@@ -570,7 +574,13 @@ class ToolDispatchTable:
                 error={"type": "unavailable", "message": "get_code_relationships not available on this side"},
             )
 
-        entity_name = str(arguments.get("entity_name", "")).strip()
+        entity_name = str(
+            arguments.get("entity_name")
+            or arguments.get("symbol")
+            or arguments.get("symbol_name")
+            or arguments.get("name")
+            or ""
+        ).strip()
         relationship_type = str(arguments.get("relationship_type") or "GENERIC").upper().strip()
         direction = str(arguments.get("direction") or "FORWARD").upper().strip()
         scope = str(arguments.get("scope") or "LOCAL").upper().strip()
@@ -579,8 +589,8 @@ class ToolDispatchTable:
 
         if not entity_name:
             return ToolObservation(
-                tool_call_id=tool_call_id, tool_name=reported_tool_name, success=False,
-                error={"type": "invalid_args", "message": "entity_name is required"},
+                tool_call_id=tool_call_id, tool_name="get_code_relationships", success=False,
+                error={"type": "invalid_args", "message": "entity_name is required (pass 'entity_name' or 'symbol')"},
             )
 
         if direction not in ("FORWARD", "REVERSE", "BOTH"):

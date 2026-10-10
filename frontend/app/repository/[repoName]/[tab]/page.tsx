@@ -8,6 +8,7 @@ import KnowledgeGraphView from '@/components/repository/KnowledgeGraphView';
 import SemanticSearch from '@/components/SemanticSearch';
 import RepositorySummary from '@/components/RepositorySummary';
 import { WorkspaceLayout } from '@/components/workspace/WorkspaceLayout';
+import MultiAgentInvestigationView from '@/components/investigation/MultiAgentInvestigationView';
 
 export default function TabPage() {
   const params = useParams();
@@ -18,6 +19,8 @@ export default function TabPage() {
     switch (tab) {
       case 'workspace':
         return <WorkspaceLayout initialRepoName={repoName} />;
+      case 'investigation':
+        return <MultiAgentInvestigationView repoName={repoName} />;
       case 'explorer':
         return <ExplorerView repoName={repoName} />;
       case 'knowledge-graph':

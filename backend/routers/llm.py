@@ -152,20 +152,26 @@ def get_valid_models() -> Dict[str, str]:
     """
     Return available models based on deployment mode.
 
-    LOCAL mode: Qwen/Ollama models only
-    PROD mode: Cloud providers (Gemini, OpenRouter) with actual model names
+    LOCAL mode: Defaults to local Qwen models, but allows selecting Cloud models (Gemini, Groq, OpenRouter).
+    PROD mode: Cloud providers (Gemini, Groq, OpenRouter) ONLY.
     """
+    cloud_models = {
+        settings.gemini_model: f"Gemini ({settings.gemini_model})",
+        settings.groq_model: f"Groq ({settings.groq_model})",
+        settings.openrouter_model: f"OpenRouter ({settings.openrouter_model})",
+    }
+
     if settings.deployment_type == "PROD":
-        return {
-            settings.gemini_model: f"Gemini ({settings.gemini_model})",
-            settings.groq_model: f"Groq ({settings.groq_model})",
-            settings.openrouter_model: f"OpenRouter ({settings.openrouter_model})",
+        # PROD: Cloud models only
+        return cloud_models
+    else:
+        # LOCAL: Qwen models by default, plus options to choose cloud models (OpenRouter, Groq, Gemini)
+        models = {
+            settings.model_local_fast: "Qwen 3 4B (Local - Fast)",
+            settings.model_local_quality: "Qwen 2.5 Coder 7B (Local - Quality)",
         }
-    else:  # LOCAL or any other mode defaults to local models
-        return {
-            settings.model_local_fast: "Qwen 3 4B (Fast)",
-            settings.model_local_quality: "Qwen 2.5 Coder 7B (Quality)",
-        }
+        models.update(cloud_models)
+        return models
 
 
 VALID_MODELS = get_valid_models()
@@ -192,6 +198,7 @@ class AnalyzeRequest(BaseModel):
     repo_hash: str
     model: str = None
     show_tool_details: bool = True
+    investigation_mode: Optional[str] = "single_agent"  # "single_agent" or "multi_agent"
 
 
 @router.get("/models", response_model=ModelsListResponse)
@@ -394,17 +401,43 @@ async def analyze_repository_stream(
             # 6. Create event queue for real-time tool visibility
             event_queue: asyncio.Queue = asyncio.Queue()
 
-            async def on_turn_callback(turn: QALoopTurn) -> None:
-                """Called when each turn completes; emits structured events to queue."""
+            async def on_turn_callback(turn_or_event: Any) -> None:
+                """Called when each turn completes or orchestrator emits lifecycle events."""
                 nonlocal total_prompt_tokens, total_completion_tokens
 
                 if not request.show_tool_details:
-                    print(f"[on_turn] show_tool_details=False, skipping event queue")
                     return
 
-                if turn.tool_call:
+                # If orchestrator emitted structured event dictionary directly
+                if isinstance(turn_or_event, dict):
+                    event = dict(turn_or_event)
+                    if "timestamp" not in event:
+                        event["timestamp"] = (datetime.now() - start_time).total_seconds()
+
+                    # Update token totals if token event emitted
+                    if event.get("type") == "token-update":
+                        if "prompt_tokens" in event:
+                            total_prompt_tokens = event["prompt_tokens"]
+                        if "completion_tokens" in event:
+                            total_completion_tokens = event["completion_tokens"]
+
+                    try:
+                        event_queue.put_nowait(event)
+                    except Exception as e:
+                        print(f"[on_turn] ERROR queueing orchestrator event: {e}")
+                    return
+
+
+                # Otherwise standard QALoopTurn object
+                turn = turn_or_event
+                tc_obj = getattr(turn, "tool_call", None) or {}
+                obs_obj = getattr(turn, "tool_observation", None) or {}
+                single_turn_call_id = tc_obj.get("tool_call_id") or obs_obj.get("tool_call_id") or f"turn_{turn.turn_index}"
+
+                if getattr(turn, "tool_call", None):
                     event = {
                         "type": "tool-call",
+                        "tool_call_id": single_turn_call_id,
                         "tool_name": turn.tool_call.get("tool_name"),
                         "arguments": turn.tool_call.get("arguments", {}),
                         "turn_index": turn.turn_index,
@@ -412,16 +445,16 @@ async def analyze_repository_stream(
                     }
                     try:
                         event_queue.put_nowait(event)
-                        print(f"[on_turn] tool-call queued: turn={turn.turn_index} tool={event['tool_name']}")
                     except Exception as e:
                         print(f"[on_turn] ERROR queueing tool-call: {e}")
 
-                if turn.tool_observation:
+                if getattr(turn, "tool_observation", None):
                     event = {
                         "type": "tool-response",
+                        "tool_call_id": single_turn_call_id,
                         "tool_name": turn.tool_observation.get("tool_name"),
                         "success": turn.tool_observation.get("success", False),
-                        "result_summary": turn.tool_observation.get("formatted_message", ""),
+                        "result_summary": turn.tool_observation.get("formatted_message") or turn.tool_observation.get("data", ""),
                         "result_count": len(turn.tool_observation.get("data", [])) if isinstance(turn.tool_observation.get("data"), list) else None,
                         "error": turn.tool_observation.get("error"),
                         "duration_ms": turn.duration_ms,
@@ -430,28 +463,27 @@ async def analyze_repository_stream(
                     }
                     try:
                         event_queue.put_nowait(event)
-                        print(f"[on_turn] tool-response queued: turn={turn.turn_index} tool={event['tool_name']} success={event['success']}")
                     except Exception as e:
                         print(f"[on_turn] ERROR queueing tool-response: {e}")
 
                 # Emit token update after every turn
-                total_prompt_tokens += turn.prompt_tokens
-                total_completion_tokens += turn.completion_tokens
+                total_prompt_tokens += getattr(turn, "prompt_tokens", 0)
+                total_completion_tokens += getattr(turn, "completion_tokens", 0)
                 token_event = {
                     "type": "token-update",
                     "prompt_tokens": total_prompt_tokens,
                     "completion_tokens": total_completion_tokens,
                     "total_tokens": total_prompt_tokens + total_completion_tokens,
-                    "turn_index": turn.turn_index,
+                    "turn_index": getattr(turn, "turn_index", 0),
                     "timestamp": (datetime.now() - start_time).total_seconds(),
                 }
                 try:
                     event_queue.put_nowait(token_event)
-                    print(f"[on_turn] token-update queued: total_tokens={token_event['total_tokens']}")
                 except Exception as e:
                     print(f"[on_turn] ERROR queueing token-update: {e}")
 
-            # 7. Build analysis service using shared factory (eliminates duplication with RIM comparison)
+            # 7. Build analysis service using shared factory
+            service_mode = "multi_agent" if request.investigation_mode == "multi_agent" else "rim"
             analysis_service = build_analysis_service(
                 llm_service=llm_service,
                 db=db,
@@ -466,7 +498,7 @@ async def analyze_repository_stream(
                 structured_logger=structured_log,
                 request_id=request_id,
                 repository=repo_display_name,
-                mode="rim",
+                mode=service_mode,
             )
 
             # Run analysis as background task
