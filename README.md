@@ -86,10 +86,11 @@ GitOnboard is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENS
 - **Noncommercial & Educational Use:** GitOnboard is freely available for qualifying educational, academic, personal, hobby, and other noncommercial purposes (such as learning, teaching, experimentation, and research).
 - **Commercial Use & Feature Licensing Restrictions:** Commercial use is **strictly not permitted** without separate, prior written authorization:
   - **Overall Project, Core Architecture & All Other Features:** All core rights remain exclusively with **Dheeraj Salian**. Prior written permission must be obtained from Dheeraj Salian for commercial use or licensing of the platform and its core codebase.
-  - **Module-Specific Contributions:** For commercial usage, licensing, or integration of the specific features developed by respective contributors (e.g., sandbox PTY terminal and worktree provisioning modules developed by Sujal Ranjan, or specific authentication routing tweaks by Vedanta Verma), inquiries and permissions must be directed to the respective contributor.
+  - **Module-Specific Contributions:** Commercial rights for specific contributed modules remain strictly with the respective developer who built them. For commercial usage, licensing, or integration of individual modules (e.g., sandbox PTY terminal, worktree provisioning, or verification pipeline by Sujal Ranjan; or specific authentication routing tweaks by Vedanta Verma), inquiries and permissions must be directed to that contributor.
+  - **Mutual Commercialization Boundary:** No contributor or third party may commercialize or license features or modules created by another developer.
 - **Public Availability:** The public availability of this repository on GitHub does not grant commercial rights or licenses.
 - **Inquiries & Permissions:**
-  - **General, Core Platform & Licensing:** Contact project owner **Dheeraj Salian** via GitHub: [https://github.com/salianDheeraj](https://github.com/salianDheeraj) or email: [dheerajsalian16@gmail.com](mailto:dheerajsalian16@gmail.com).
-  - **Sujal Ranjan (Sandbox Terminal / Worktree Features):** [sujalranjan02@gmail.com](mailto:sujalranjan02@gmail.com)
-  - **Vedanta Verma (Auth / Search Bar Contributions):** [vedantverma2005@gmail.com](mailto:vedantverma2005@gmail.com)
+  - **General, Core Platform & Architecture Licensing:** Contact project owner **Dheeraj Salian** via GitHub: [https://github.com/salianDheeraj](https://github.com/salianDheeraj) or email: [dheerajsalian16@gmail.com](mailto:dheerajsalian16@gmail.com).
+  - **Sujal Ranjan (Sandbox Terminal / Worktree / Verification Modules):** [sujalranjan02@gmail.com](mailto:sujalranjan02@gmail.com)
+  - **Vedanta Verma (Auth / Search Bar Modules):** [vedantverma2005@gmail.com](mailto:vedantverma2005@gmail.com)
 

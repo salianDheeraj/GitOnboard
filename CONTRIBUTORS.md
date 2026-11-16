@@ -25,8 +25,9 @@ This document details the roles, core architectural and engineering ownership, a
 - **Email**: [sujalranjan02@gmail.com](mailto:sujalranjan02@gmail.com)
 - **GitHub**: [@Sujalranjan](https://github.com/Sujalranjan)
 - **Key Contributions**:
-  - **In-Browser Terminal & Sandbox Host Execution**: Interactive shell and pseudo-terminal (PTY) session management (`backend/services/pty_session.py`, `backend/routers/sandbox.py`) and browser xterm.js terminal panel.
-  - **Worktree Provisioning & Cleanup**: Worktree provisioning service for isolated execution (`backend/services/worktree_provisioner.py`) and repository disk state cleanup (`backend/services/repo_cleanup.py`).
+  - **In-Browser Terminal & Sandbox Host Execution**: Interactive shell and pseudo-terminal (PTY) session management (`backend/services/pty_session.py`, `backend/routers/sandbox.py`) and browser xterm.js terminal integration.
+  - **Worktree Provisioning & Cleanup**: Worktree provisioning service for isolated sandbox execution (`backend/services/worktree_provisioner.py`) and repository disk state cleanup (`backend/services/repo_cleanup.py`).
+  - **Code Verification & Repair Pipeline Prototype**: Static/dynamic code verifier orchestrator and repair harness (`backend/verification/`, `backend/routers/verification_pipeline.py`).
   - **Workspace UI Shell**: Multi-panel IDE layout shell (dock container, editor, and file tree UI components).
   - **UI Enhancements**: Theme toggle switching provider and minor navigation adjustments.
 
@@ -45,5 +46,9 @@ This document details the roles, core architectural and engineering ownership, a
 
 For full licensing details and commercial usage inquiries, refer to the [License & Commercial Use](README.md#license--commercial-use) section in `README.md` and [LICENSE](LICENSE).
 
-- **General Platform, Architecture & Core Rights**: Exclusively owned and reserved by **Dheeraj Salian**.
-- **Module-Specific Feature Permissions**: Contact **Sujal Ranjan** (for sandbox PTY terminal and worktree provisioning modules) or **Vedanta Verma** (for specific auth routing tweaks) regarding permissions for their individual module contributions.
+- **Core Platform, Architecture & All Unlisted Features**: Exclusively owned, copyrighted, and reserved by **Dheeraj Salian**. No third party or contributor may commercialize, sublicense, or relicense the core platform or its architecture without prior written authorization from Dheeraj Salian.
+- **Module-Specific Contributor Rights**:
+  - **Sujal Ranjan**: Commercial usage, licensing, or extraction of the sandbox PTY terminal, worktree provisioning, or verification orchestrator code requires written permission from Sujal Ranjan.
+  - **Vedanta Verma**: Commercial usage or licensing of specific auth routing and search bar UI contributions requires written permission from Vedanta Verma.
+- **Mutual Boundary**: No individual developer or contributor has rights to commercialize or license work created by another developer. All commercial rights remain strictly tied to the original author of each respective module.
+
