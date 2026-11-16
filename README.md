@@ -58,7 +58,9 @@ For detailed setup, environment configuration, and troubleshooting, see [Develop
 
 ## Project Guidelines
 
-This is a college-level Final Year Project. See [CLAUDE.md](CLAUDE.md) for engineering principles and architectural constraints.
+This is a college-level Final Year Major Project. See [CLAUDE.md](CLAUDE.md) for engineering principles and architectural constraints.
+
+> **Project Status & Maintenance Notice:** Active development for this project is concluded and it is not intended for commercialization. No further major changes or new features are planned unless explicitly required for academic submission criteria or critical bug fixes.
 
 **Key Rules:**
 - Backend and database run in Docker Compose (PostgreSQL only — no SQLite)
@@ -69,11 +71,11 @@ This is a college-level Final Year Project. See [CLAUDE.md](CLAUDE.md) for engin
 
 ## Team & Authors
 
-| Name | Role | Email |
-|------|------|-------|
-| **Dheeraj Salian** | Project Creator, Lead Architect & Principal Engineer | [dheerajsalian16@gmail.com](mailto:dheerajsalian16@gmail.com) |
-| **Sujal Ranjan** | Contributor | [sujalranjan02@gmail.com](mailto:sujalranjan02@gmail.com) |
-| **Vedanta Verma** | Contributor | [vedantverma2005@gmail.com](mailto:vedantverma2005@gmail.com) |
+| Name | Role | Commits (%) | Code Contribution (%) | Email |
+|------|------|:-----------:|:---------------------:|-------|
+| **Dheeraj Salian** | Project Creator, Lead Architect & Principal Engineer | **676 (96.85%)** | **566,390 lines (95.64%)** | [dheerajsalian16@gmail.com](mailto:dheerajsalian16@gmail.com) |
+| **Sujal Ranjan** | Contributor | **20 (2.87%)** | **25,644 lines (4.33%)** | [sujalranjan02@gmail.com](mailto:sujalranjan02@gmail.com) |
+| **Vedanta Verma** | Contributor | **2 (0.29%)** | **149 lines (0.03%)** | [vedantverma2005@gmail.com](mailto:vedantverma2005@gmail.com) |
 
 > For detailed role descriptions, architectural ownership, and a comprehensive breakdown of individual contributions, see **[CONTRIBUTORS.md](CONTRIBUTORS.md)**.
 

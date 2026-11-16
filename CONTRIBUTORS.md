@@ -1,6 +1,28 @@
 # Team & Contribution Breakdown
 
-This document details the roles, core architectural and engineering ownership, and individual contributions of all developers who have contributed to the **GitOnboard** platform.
+This document details the roles, quantitative contributions (commits & lines of code), core architectural and engineering ownership, and individual contributions of all developers who have contributed to the **GitOnboard** platform.
+
+---
+
+## Project Status & Development Notice
+
+> [!IMPORTANT]
+> **Major Project Notice & Maintenance Mode:**
+> - GitOnboard was developed as an academic **Final Year Major Project** and is **not planned for any commercial use**.
+> - **Active feature development is complete.** There will not be any new major features or structural changes unless strictly required for academic project submission requirements or critical bug fixes.
+
+---
+
+## Quantitative Contribution Summary
+
+*Metrics derived from Git commit history across repository lifecycle (`git log --numstat`):*
+
+| Contributor | Role | Commits (%) | Lines Changed (%) | Lines Added | Lines Deleted |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Dheeraj Salian** | Project Creator, Lead Architect & Principal Engineer | **676 (96.85%)** | **566,390 (95.64%)** | 460,367 | 106,023 |
+| **Sujal Ranjan** | Contributor | **20 (2.87%)** | **25,644 (4.33%)** | 20,050 | 5,594 |
+| **Vedanta Verma** | Contributor | **2 (0.29%)** | **149 (0.03%)** | 105 | 44 |
+| **Total** | | **698 (100%)** | **592,183 (100%)** | **480,522** | **111,661** |
 
 ---
 
@@ -10,6 +32,8 @@ This document details the roles, core architectural and engineering ownership, a
 - **Role**: Project Creator, Lead Architect & Principal Engineer (AI, Systems & Research)
 - **Email**: [dheerajsalian16@gmail.com](mailto:dheerajsalian16@gmail.com)
 - **GitHub**: [@salianDheeraj](https://github.com/salianDheeraj)
+- **Commit Contribution**: 96.85% (676 commits)
+- **Code Contribution**: 95.64% of total lines changed (460,367 lines added)
 - **Key Contributions**:
   - **Core Code Intelligence**: Multi-language Tree-sitter CST parsing, symbol resolution, relational Fact Store (Layer 4), RIM graph construction, and deterministic call/dependency graph algorithms.
   - **Information Retrieval & Search**: Hybrid search engine combining BM25 keyword index, ChromaDB vector embeddings, bounded multi-hop graph traversal, and staleness/rebuild detection pipelines.
@@ -24,6 +48,8 @@ This document details the roles, core architectural and engineering ownership, a
 - **Role**: Contributor
 - **Email**: [sujalranjan02@gmail.com](mailto:sujalranjan02@gmail.com)
 - **GitHub**: [@Sujalranjan](https://github.com/Sujalranjan)
+- **Commit Contribution**: 2.87% (20 commits)
+- **Code Contribution**: 4.33% of total lines changed (20,050 lines added)
 - **Key Contributions**:
   - **In-Browser Terminal & Sandbox Host Execution**: Interactive shell and pseudo-terminal (PTY) session management (`backend/services/pty_session.py`, `backend/routers/sandbox.py`) and browser xterm.js terminal integration.
   - **Worktree Provisioning & Cleanup**: Worktree provisioning service for isolated sandbox execution (`backend/services/worktree_provisioner.py`) and repository disk state cleanup (`backend/services/repo_cleanup.py`).
@@ -36,6 +62,8 @@ This document details the roles, core architectural and engineering ownership, a
 ### Vedanta Verma
 - **Role**: Contributor
 - **Email**: [vedantverma2005@gmail.com](mailto:vedantverma2005@gmail.com)
+- **Commit Contribution**: 0.29% (2 commits)
+- **Code Contribution**: 0.03% of total lines changed (105 lines added)
 - **Key Contributions**:
   - **Authentication Routing**: Fixes to authentication routing and proxy cookie handling (`backend/routers/auth.py`, `frontend/proxy.ts`).
   - **UI Tweaks**: Minor styling adjustments to the global search bar input and dashboard layout.
